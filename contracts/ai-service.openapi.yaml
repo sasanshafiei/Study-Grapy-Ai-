@@ -1,0 +1,49 @@
+openapi: 3.0.3
+info:
+  title: StudyGraph AI Service (internal contract)
+  version: 0.1.0
+  description: >
+    The boundary between the CE team (core-api) and the AI team (ai-service).
+    This file is the source of truth. Changing it needs sign-off from one CE
+    and one AI member. The CE side builds against the mock in
+    services/ai-service until the real handlers land.
+
+servers:
+  - url: http://ai-service:8000/ai/v1
+
+paths:
+  /index/documents:
+    post:
+      summary: Chunk, embed and topic-tag a document (job)
+      description: Owner AI-1. Returns 202 + job_id for large docs in the real version.
+  /topics/extract:
+    post:
+      summary: Extract a topic map and search queries for a course (job)
+      description: Owner AI-2. Feeds the external harvester.
+  /chat/answer:
+    post:
+      summary: Answer a question over class + external sources, with citations (stream)
+      description: Owner AI-1. See the example payload in docs / the plan.
+  /quiz/generate:
+    post:
+      summary: Generate quiz questions from retrieved chunks (job)
+      description: Owner AI-1.
+  /exam/generate:
+    post:
+      summary: Generate exam questions from a blueprint, class-only scope (job)
+      description: Owner AI-1, quality flags by AI-2.
+  /mastery/update:
+    post:
+      summary: Update per-topic mastery from new attempts (sync)
+      description: Owner AI-2.
+  /recommendations:
+    post:
+      summary: Rank what the student should study next (sync)
+      description: Owner AI-2.
+  /analytics/refresh:
+    post:
+      summary: Recompute class + item statistics (job, nightly)
+      description: Owner AI-2.
+
+# The one call in the other direction lives on core-api, not here:
+#   POST /internal/web/search   (owner CE-1) — live web fallback, Lane B.
