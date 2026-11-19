@@ -4,14 +4,18 @@ The shape is the web client's DocumentItem (apps/web/src/lib/api/types.ts on
 the CE-2 branch), in snake_case. Internal storage details (storage key, file
 path, hash, size, MIME type, job errors) are never part of it.
 
-Mappings (provisional for M2, see docs/document-ingestion.md):
+Mappings (provisional, see docs/document-ingestion.md and docs/document-processing.md):
 
-  documents.status   condition                     public status
-  pending            a job of the document runs    processing
-  pending            otherwise                     queued
-  indexed                                          ready
-  failed                                           failed
-  stale                                            failed, with an explanation
+  documents.status   condition                              public status
+  pending            a job of the document runs             processing
+  pending            parsed (succeeded parse job), waiting  processing
+                     for indexing (M4)
+  pending            otherwise                              queued
+  indexed                                                   ready
+  failed                                                    failed
+  stale                                                     failed, with an explanation
+
+  Parsing alone never makes a document ready: only indexing (M4) sets indexed.
 
   documents.origin: class -> class, external -> external, web_cache -> web
   documents.kind:   stored value; when NULL (legacy and external rows) a
@@ -52,7 +56,7 @@ class DocumentItem(BaseModel):
 
 
 class DocumentUploadResponse(DocumentItem):
-    job_id: uuid.UUID = Field(description="The parse job recorded for this upload (queued; not yet processed).")
+    job_id: uuid.UUID = Field(description="The parse job recorded for this upload (queued for processing).")
 
 
 class ErrorBody(BaseModel):
@@ -68,9 +72,9 @@ def public_origin(origin: str) -> PublicOrigin:
     return _ORIGINS[origin]  # values are constrained by documents_origin_check
 
 
-def public_status(status: str, *, job_running: bool) -> PublicStatus:
+def public_status(status: str, *, job_running: bool, parsed: bool = False) -> PublicStatus:
     if status == "pending":
-        return "processing" if job_running else "queued"
+        return "processing" if job_running or parsed else "queued"
     return _STATUSES[status]  # values are constrained by documents_status_check
 
 

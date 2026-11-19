@@ -41,12 +41,18 @@ check everything is wired:
 
 ```bash
 docker compose exec core-api alembic upgrade head
-docker compose exec core-api alembic current   # expect: 0002 (head)
+docker compose exec core-api alembic current   # expect: 0003 (head)
+docker compose exec core-api python -m app.ingestion.admin init-storage --database studygraph   # once
 
 curl localhost:8000/health        # core-api up
 curl localhost:8000/health/db     # db reachable + pgvector installed
 curl localhost:8001/health        # mock ai-service up
 ```
+
+The document workers (`worker`, `worker-maintenance`, `beat`) exit until the schema
+is at head; restart them after migrating (`docker compose up -d`). Redis is not
+published on the host (the workers trust what it hands them); see
+[docs/document-processing.md](docs/document-processing.md).
 
 Interactive API docs: http://localhost:8000/docs and http://localhost:8001/docs
 

@@ -8,7 +8,17 @@ psycopg[binary]==3.2.3
 pgvector==0.3.6
 pydantic-settings==2.6.1
 celery==5.4.0
+# Celery's runtime stack, pinned to the Celery 5.4 line. Left unpinned, pip resolves
+# kombu 5.7.x, whose Redis transport requires redis-py >= 6.4 (redis is pinned to 5.2.0
+# below), plus billiard/amqp releases newer than anything Celery 5.4 was tested with.
+kombu==5.4.2
+billiard==4.2.4
+amqp==5.3.1
+vine==5.1.0
 redis==5.2.0
 httpx==0.28.1
 alembic==1.20.1
 python-multipart==0.0.34
+# PDF text extraction (M3). Pure Python, BSD-3-Clause, no runtime dependencies on 3.11.
+# Runs only inside the resource-limited extractor subprocess (app/ingestion/extract_child.py).
+pypdf==7.1.1

@@ -37,7 +37,7 @@ pass the same files to every command below.
 ```bash
 docker compose up -d --build                       # start the stack (rebuild after dependency changes)
 docker compose exec core-api alembic upgrade head  # create / update the schema
-docker compose exec core-api alembic current       # revision the database is at, e.g. "0002 (head)"
+docker compose exec core-api alembic current       # revision the database is at, e.g. "0003 (head)"
 docker compose exec core-api alembic history       # all revisions
 docker compose exec core-api alembic check         # models vs. database: expect "No new upgrade operations detected."
 docker compose exec core-api alembic upgrade head --sql   # print the SQL only, connect to nothing
@@ -82,6 +82,42 @@ data the downgrade restores the baseline schema exactly.
 `downgrade --sql` output contains them and they run wherever that SQL is executed
 later. Run that output as a script (`psql -f`); it contains `%` placeholders for
 PL/pgSQL `RAISE`, so do not pass it through a driver that interprets `%`.
+
+## Revision 0003: document sections, job scheduling and fencing, storage identity
+
+Adds to `ingestion_jobs` the columns `attempt_token` (uuid), `lease_expires_at`,
+`last_dispatched_at` (nullable `timestamptz`) and `available_at` (`timestamptz NOT
+NULL DEFAULT now()`; PostgreSQL stores the value once, so the table is not rewritten
+and existing jobs become dispatchable at once), the CHECK `ingestion_jobs_lease_check`
+(a running job has a token and a lease after its start), and two tables:
+`document_sections` (ordered, page-aware normalized text, `ON DELETE CASCADE` from
+`documents`, unique `(document_id, ordinal)`, CHECKs on ordinal, text and locator) and
+`storage_identity` (one row). `documents` is unchanged. See
+[document-processing.md](document-processing.md) for what they mean.
+
+**Upgrade preflight.** The migration locks `ingestion_jobs` against concurrent writes
+(`SHARE ROW EXCLUSIVE`, until it commits) and stops before any change if a job is
+`running`: such a job has no attempt token or lease to give it. M2 never sets jobs
+running, so a real M2 database passes. Check read-only before upgrading:
+
+```bash
+docker compose exec -T db psql -U studygraph -d studygraph -X -At -c \
+  "SELECT count(*) FROM ingestion_jobs WHERE status = 'running'"
+# expect: 0
+```
+
+**Downgrade guard.** `alembic downgrade 0002` (or lower) is refused, before any change,
+while `document_sections` has rows, a job carries attempt or dispatch state (`running`,
+`attempt_token`, `lease_expires_at` or `last_dispatched_at` set), a queued job is
+scheduled for a later retry (`available_at` in the future: the backoff would be lost),
+or a storage identity is recorded. Remove that state on purpose first. Without it the
+downgrade restores the 0002 schema exactly.
+
+**Offline SQL.** Both checks are `DO` blocks, as for 0002.
+
+**Order.** Migrate before starting the M3 workers: they check the revision at start and
+exit (status 78) otherwise. After migrating, bind the upload store once with
+`python -m app.ingestion.admin init-storage --database <name>`.
 
 ## Safety guard: which database a migration may touch
 
@@ -209,12 +245,20 @@ The script needs Docker, `bash` and `openssl`. It:
 - creates a new **`--internal`** Docker network. It has no outbound traffic and no
   route to the host machine, so `host.docker.internal` and anything published on
   the host are unreachable. The docker-compose network is not attached, so the
-  development `db` service does not resolve.
+  development `db` and `redis` services do not resolve.
 - starts a throwaway `pgvector/pgvector:pg16` container on that network, with tmpfs
   storage and no published ports.
-- uses random names, credentials and a random identity token, and stores the token
-  as the database's `COMMENT`.
-- runs pytest in a separate container on that network.
+- starts a throwaway Redis (`redis:7`) on the same network: random password, no
+  persistence, tmpfs, no published ports. The M3 broker and worker tests use it.
+- uses random names, credentials and random identity tokens; stores the database
+  token as the database's `COMMENT` and the Redis token under the key
+  `studygraph:disposable-test`. Tests refuse a Redis without that key
+  (`tests/disposable_redis.py`), as they refuse a database without the comment, and
+  never flush it: every test uses uniquely named queues.
+- runs pytest in a separate container on that network. Celery workers and Beat
+  started by the M3 tests run inside that container against the two throwaway
+  servers; their own start-up check verifies the database comment
+  (`DATABASE_REQUIRE_COMMENT`).
 - migrates the test database to `0001`, normalizes its `pg_dump --schema-only`, and
   requires it to equal `tests/fixtures/scaffold_schema.sql`.
 - removes only the resources it created.
@@ -261,6 +305,16 @@ database at head.
     upload data it is refused and nothing changes;
   - the offline SQL carries both checks, and the rendered upgrade still refuses
     invalid data when executed.
+- Revision `0003`:
+  - upgrading from 0002 with representative data (legacy rows, stored uploads,
+    queued, requeued and failed jobs) keeps every row and table OID and makes queued
+    jobs dispatchable;
+  - a running job stops the upgrade before any change (also from rendered SQL);
+  - every new CHECK (locator, text, ordinal, lease), unique, foreign-key and cascade
+    rule, including NULLs, and that ordered reads use the unique index;
+  - a downgrade without M3 state restores 0002 exactly and upgrades again; with any
+    kind of M3 state it is refused and nothing changes;
+  - the historical baseline is unchanged after going through 0003.
 - Baseline `0001`:
   - the catalog snapshot equals the scaffold;
   - PK, FK, unique, NOT NULL and default behaviour hold;

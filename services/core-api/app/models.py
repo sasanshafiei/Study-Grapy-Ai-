@@ -26,6 +26,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -175,10 +176,17 @@ class IngestionJob(Base):
     """Durable record of one unit of ingestion work on a document.
 
     Written in the same transaction as the document it belongs to, so a job is
-    never lost between the API and the queue: the row itself is what a worker
-    (M3) dispatches and claims. Allowed transitions, applied with conditional
-    UPDATEs: queued -> running -> succeeded | failed | queued (retry while
-    attempts remain); failed -> queued only by an explicit retry.
+    never lost between the API and the queue: the row itself is the outbox the
+    dispatcher publishes from and the record a worker claims. Transitions,
+    applied with conditional UPDATEs (app/ingestion/jobs.py): queued -> running
+    (claim: new attempt_token and lease) -> succeeded | failed | queued (retry
+    while attempts remain, with backoff in available_at). A failed job stays
+    failed; an operator retry creates a new job row.
+
+    Revision 0003 added the scheduling and fencing columns (attempt_token ..
+    last_dispatched_at). A running job always carries its attempt token and
+    lease (lease check); every write made on behalf of an attempt is
+    conditional on that token still being current.
     """
 
     __tablename__ = "ingestion_jobs"
@@ -196,6 +204,11 @@ class IngestionJob(Base):
             " OR (status = 'failed' AND finished_at IS NOT NULL"
             " AND (started_at IS NULL OR finished_at >= started_at))",
             name="lifecycle",
+        ),
+        CheckConstraint(
+            "status <> 'running' OR (attempt_token IS NOT NULL AND lease_expires_at IS NOT NULL"
+            " AND lease_expires_at > started_at)",
+            name="lease",
         ),
         Index(None, "document_id"),
         # At most one queued or running job of each kind per document.
@@ -219,6 +232,71 @@ class IngestionJob(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # --- added by revision 0003 (dispatch, retry scheduling, attempt fencing) ---
+    # Identity of the current (or last finishing) attempt; new for every claim.
+    attempt_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # A running attempt not finished by then is presumed dead (recovery).
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Neither claimed nor dispatched before this time: retry backoff.
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # When a message for the job was last reserved for publication; NULL = not published.
+    last_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DocumentSection(Base):
+    """Normalized text of one source page of a parsed document (M3, CE-1).
+
+    Sections are what parsing produces and what indexing (AI-1) consumes; they
+    are not retrieval chunks. One section per page that has text: `ordinal` is
+    0-based and contiguous within a document, in page order; `locator` is
+    {"page": n} with the 1-based physical page number, so pages without text
+    leave gaps in page numbers but never in ordinals. A document's sections
+    are replaced as one set, in the transaction that completes its parse job.
+    """
+
+    __tablename__ = "document_sections"
+    __table_args__ = (
+        CheckConstraint("ordinal >= 0", name="ordinal"),
+        CheckConstraint("btrim(text, E' \\t\\n\\r') <> ''", name="text"),
+        # Exactly {"page": <integer 1 .. 2^31-1>}. The CASE keeps the cast from
+        # running on non-numbers and makes a missing key FALSE, never NULL.
+        CheckConstraint(
+            "CASE WHEN jsonb_typeof(locator) = 'object' AND jsonb_typeof(locator -> 'page') = 'number'"
+            " AND (locator - 'page') = '{}'::jsonb"
+            " THEN (locator ->> 'page')::numeric BETWEEN 1 AND 2147483647"
+            " AND (locator ->> 'page')::numeric = trunc((locator ->> 'page')::numeric)"
+            " ELSE false END",
+            name="locator",
+        ),
+        UniqueConstraint("document_id", "ordinal"),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    locator: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class StorageIdentity(Base):
+    """Which upload store this database's stored files live in (single row, M3).
+
+    `storage_id` must equal the id in the store's marker file
+    (<UPLOAD_DIR>/.studygraph-storage) before the API stores an upload or a
+    worker claims a job, so a wrong, empty or missing mount fails closed
+    instead of making documents look like they lost their files. Written only
+    by the explicit `init-storage` command (app/storage_identity.py).
+    """
+
+    __tablename__ = "storage_identity"
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, server_default=text("1"))
+    storage_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 # --- The one index --------------------------------------------------------

@@ -3,31 +3,41 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
+from .celery_app import make_celery
 from .config import Settings
 from .config import settings as default_settings
 from .db import SessionLocal, get_db
 from .errors import ApiError, api_error_handler, unhandled_error_handler
+from .ingestion.dispatch import CeleryPublisher, Publisher
 from .routers import documents
 from .storage import LocalFileStorage
+
+_DEFAULT = object()
 
 
 def create_app(
     settings: Settings | None = None,
     session_factory: sessionmaker[Session] | None = None,
     storage: LocalFileStorage | None = None,
+    publisher: Publisher | None | object = _DEFAULT,
 ) -> FastAPI:
     """Build the application.
 
-    Everything that touches the database or the file store goes through
-    app.state, so an application built with its own session factory and
-    storage (as the tests do) has no path to the default engine or the real
-    upload directory. Building the app connects to nothing and creates nothing.
+    Everything that touches the database, the file store or the broker goes
+    through app.state, so an application built with its own session factory,
+    storage and publisher (as the tests do) has no path to the default engine,
+    the real upload directory or the real broker. Pass publisher=None to
+    publish nothing after uploads (the dispatch sweep still does). Building
+    the app connects to nothing and creates nothing.
     """
     settings = settings or default_settings
     app = FastAPI(title="StudyGraph Core API", version="0.1.0")
     app.state.settings = settings
     app.state.session_factory = session_factory or SessionLocal
     app.state.storage = storage or LocalFileStorage(settings.upload_dir)
+    if publisher is _DEFAULT:
+        publisher = CeleryPublisher(make_celery(settings), settings) if settings.dispatch_on_upload else None
+    app.state.publisher = publisher
 
     # Wide-open CORS for development so web + mobile can call freely.
     # Tighten this before any public deployment.

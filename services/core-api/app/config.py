@@ -1,9 +1,11 @@
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MIB = 1024 * 1024
+
+QUEUE_NAME_PATTERN = r"^[A-Za-z0-9._-]{1,100}$"
 
 
 class Settings(BaseSettings):
@@ -11,12 +13,17 @@ class Settings(BaseSettings):
 
     Field names map to env vars case-insensitively, so `database_url`
     is read from DATABASE_URL.
+
+    The database and broker URLs can carry passwords, so they are SecretStr:
+    repr(), str() and JSON dumps of the settings show `**********`, and
+    validation errors never echo input values (hide_input_in_errors). Code
+    that needs the real URL calls .get_secret_value() at the point of use.
     """
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
-    database_url: str = "postgresql+psycopg://studygraph:studygraph@db:5432/studygraph"
-    redis_url: str = "redis://redis:6379/0"
+    database_url: SecretStr = SecretStr("postgresql+psycopg://studygraph:studygraph@db:5432/studygraph")
+    redis_url: SecretStr = SecretStr("redis://redis:6379/0")
     ai_service_url: str = "http://ai-service:8000"
     environment: str = "development"
 
@@ -26,6 +33,84 @@ class Settings(BaseSettings):
     # Largest accepted upload, in bytes (25 MiB). Lecture PDFs are normally far
     # below this; raise it for image-heavy slide exports.
     max_upload_bytes: int = Field(default=25 * MIB, gt=0, le=1024 * MIB)
+
+    # --- asynchronous processing (M3, see docs/document-processing.md) -----------------
+    # Broker queues; configurable so that tests can use queues nobody else consumes.
+    parse_queue: str = Field(default="ingestion.parse", pattern=QUEUE_NAME_PATTERN)
+    maintenance_queue: str = Field(default="ingestion.maintenance", pattern=QUEUE_NAME_PATTERN)
+    # Publish the parse job from the API right after an upload is committed.
+    # Off by default: socket timeouts bound each broker operation's inactivity,
+    # not its total wall-clock time, so a slowly answering broker could hold an
+    # API worker thread. The dispatch sweep (every DISPATCH_INTERVAL_SECONDS, on
+    # the maintenance worker, under a Celery hard time limit) publishes new jobs.
+    dispatch_on_upload: bool = False
+    # Broker I/O bounds for every publish: at most broker_publish_attempts
+    # attempts; each broker read/write is bounded by the socket timeout.
+    broker_connect_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    broker_socket_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    broker_publish_attempts: int = Field(default=2, ge=1, le=5)
+    # Redis visibility timeout for unacknowledged messages (task_acks_late).
+    broker_visibility_timeout_seconds: int = Field(default=3600, ge=60)
+
+    # Extraction subprocess limits, per attempt.
+    parse_timeout_seconds: int = Field(default=120, ge=1, le=3600)
+    parse_memory_limit_mb: int = Field(default=512, ge=128, le=16384)
+    parse_max_pages: int = Field(default=1000, ge=1, le=100_000)
+    parse_max_text_chars: int = Field(default=5_000_000, ge=1000, le=50_000_000)
+    # Celery limits of the parse task; the job lease is derived from them.
+    parse_task_soft_time_limit_seconds: int = Field(default=150, ge=2)
+    parse_task_time_limit_seconds: int = Field(default=180, ge=3)
+    job_lease_margin_seconds: int = Field(default=120, ge=1)
+    # Backoff after a transient failure: base * 2**(attempt - 1), +-20 %, capped.
+    retry_backoff_base_seconds: int = Field(default=30, ge=0)
+    retry_backoff_max_seconds: int = Field(default=600, ge=0)
+
+    # Dispatch sweep (the durable outbox is the ingestion_jobs table). With
+    # dispatch_on_upload off, this interval is the main pick-up latency of uploads.
+    dispatch_interval_seconds: float = Field(default=10, gt=0)
+    dispatch_batch_size: int = Field(default=100, ge=1, le=10_000)
+    # A published job still queued after this long is published again (lost message).
+    redispatch_after_seconds: int = Field(default=300, ge=1)
+    # After a failed publish the job is not published again before this delay.
+    publish_retry_delay_seconds: int = Field(default=30, ge=0)
+    # Advisory: the sweep publishes nothing while the parse queue holds this many messages.
+    dispatch_max_queue_depth: int = Field(default=100, ge=1)
+    # Recovery of running jobs whose lease expired.
+    recovery_interval_seconds: float = Field(default=60, gt=0)
+    recovery_batch_size: int = Field(default=100, ge=1, le=10_000)
+    # File reconciliation.
+    reconcile_interval_seconds: float = Field(default=3600, gt=0)
+    reconcile_temp_grace_seconds: int = Field(default=3600, ge=0)
+    reconcile_orphan_grace_seconds: int = Field(default=86400, ge=0)
+    reconcile_batch_size: int = Field(default=1000, ge=1)
+    maintenance_task_soft_time_limit_seconds: int = Field(default=100, ge=1)
+    maintenance_task_time_limit_seconds: int = Field(default=120, ge=2)
+
+    @model_validator(mode="after")
+    def _ordered_limits(self) -> "Settings":
+        """parse timeout < soft limit < hard limit (< lease), visibility timeout above both."""
+        if not self.parse_timeout_seconds < self.parse_task_soft_time_limit_seconds < self.parse_task_time_limit_seconds:
+            raise ValueError(
+                "PARSE_TIMEOUT_SECONDS < PARSE_TASK_SOFT_TIME_LIMIT_SECONDS < PARSE_TASK_TIME_LIMIT_SECONDS is required"
+            )
+        if self.broker_visibility_timeout_seconds <= 2 * self.parse_task_time_limit_seconds:
+            raise ValueError("BROKER_VISIBILITY_TIMEOUT_SECONDS must exceed twice PARSE_TASK_TIME_LIMIT_SECONDS")
+        if not self.maintenance_task_soft_time_limit_seconds < self.maintenance_task_time_limit_seconds:
+            raise ValueError("MAINTENANCE_TASK_SOFT_TIME_LIMIT_SECONDS must be below the hard limit")
+        if self.retry_backoff_max_seconds < self.retry_backoff_base_seconds:
+            raise ValueError("RETRY_BACKOFF_MAX_SECONDS must not be below RETRY_BACKOFF_BASE_SECONDS")
+        if self.parse_queue == self.maintenance_queue:
+            raise ValueError("PARSE_QUEUE and MAINTENANCE_QUEUE must differ")
+        return self
+
+    @property
+    def job_lease_seconds(self) -> int:
+        """How long a claimed attempt may hold its job before recovery treats it as dead.
+
+        Longer than the Celery hard time limit, by which a live worker has
+        already killed the attempt; the margin covers persisting the result.
+        """
+        return self.parse_task_time_limit_seconds + self.job_lease_margin_seconds
 
 
 settings = Settings()

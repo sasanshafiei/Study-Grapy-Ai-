@@ -265,7 +265,9 @@ def test_list_maps_internal_states_to_public_ones(api, world, professor, course)
     api.as_user(professor)
     running_id = api.upload(course, make_pdf("running"), filename="running.pdf").json()["id"]
     world.execute(
-        "UPDATE ingestion_jobs SET status = 'running', attempt_count = 1, started_at = now() WHERE document_id = :d",
+        # Since revision 0003 a running job must carry an attempt token and a lease.
+        "UPDATE ingestion_jobs SET status = 'running', attempt_count = 1, started_at = now(), "
+        "attempt_token = gen_random_uuid(), lease_expires_at = now() + interval '5 minutes' WHERE document_id = :d",
         d=running_id,
     )
     ready = world.document(course, title="ready.pdf", status="indexed", kind="slides", page_count=12)

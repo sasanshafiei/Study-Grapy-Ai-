@@ -3,10 +3,15 @@
 - World creates users, courses, enrollments and documents on the disposable
   database and deletes exactly what it created afterwards, so every API test
   leaves the database as it found it (the M1 runner downgrades to base after
-  pytest, which migration 0002 refuses while upload data exists).
+  pytest, which migrations 0002 and 0003 refuse while upload, section, job
+  or storage-identity data exists). Deleting documents also removes their
+  jobs and sections (ON DELETE CASCADE); the storage identity row is removed
+  as well.
 - ApiHarness builds a separate application per test with create_app(): its
   own session factory (bound to the verified disposable database), its own
-  temporary upload directory, and a principal injected through
+  temporary upload directory, bound to the database's storage identity (M3:
+  the API refuses uploads into a store the database does not know), a
+  recording publisher instead of a broker, and a principal injected through
   dependency_overrides on that instance only. The runtime `app.main.app` is
   never modified.
 - asgi_call() drives the application with hand-made ASGI messages, for cases
@@ -28,11 +33,53 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app import storage_identity
 from app.auth import CurrentUser, get_current_user, not_authenticated
 from app.config import Settings
+from app.ingestion.dispatch import PublishError
 from app.main import create_app
 from app.storage import INCOMING_DIR, LocalFileStorage
 from tests.pdf_samples import make_pdf
+
+_UNSET = object()
+
+
+class RecordingPublisher:
+    """Stands in for the broker in API tests: records what would have been published."""
+
+    def __init__(self, *, fail: bool = False, depth: int = 0) -> None:
+        self.published: list[uuid.UUID] = []
+        self.fail = fail
+        self.depth = depth
+
+    def publish_parse(self, job_id: uuid.UUID) -> None:
+        if self.fail:
+            raise PublishError("simulated broker outage")
+        self.published.append(job_id)
+
+    def parse_queue_depth(self) -> int:
+        if self.fail:
+            raise PublishError("simulated broker outage")
+        return self.depth
+
+
+def bind_storage(engine: Engine, root: Path) -> uuid.UUID:
+    """Make `root` carry the disposable database's storage identity (creating one if needed).
+
+    Tests use many temporary directories against one database; each gets a
+    marker with the same id, as if it were the same store.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    with engine.begin() as connection:
+        storage_id = connection.execute(
+            text(
+                "INSERT INTO storage_identity (id, storage_id) VALUES (1, gen_random_uuid()) "
+                "ON CONFLICT (id) DO UPDATE SET storage_id = storage_identity.storage_id RETURNING storage_id"
+            )
+        ).scalar_one()
+    if storage_identity.read_marker(LocalFileStorage(root)) is None:
+        storage_identity.write_marker(LocalFileStorage(root), storage_id)
+    return storage_id
 
 # The keys of DocumentItem in apps/web/src/lib/api/types.ts (CE-2), in snake_case.
 DOCUMENT_ITEM_KEYS = {
@@ -117,22 +164,38 @@ class World:
             if self.users:
                 connection.execute(text("DELETE FROM enrollments WHERE user_id = ANY(:ids)"), {"ids": self.users})
                 connection.execute(text("DELETE FROM users WHERE id = ANY(:ids)"), {"ids": self.users})
-            # Nothing from M2 may be left behind (it would block `alembic downgrade`).
+            # The storage identity is per test (each test has its own directories).
+            connection.execute(text("DELETE FROM storage_identity"))
+            # Nothing from M2/M3 may be left behind (it would block `alembic downgrade`).
             leftover_jobs = connection.execute(text("SELECT count(*) FROM ingestion_jobs")).scalar_one()
             leftover_uploads = connection.execute(
                 text("SELECT count(*) FROM documents WHERE storage_key IS NOT NULL")
             ).scalar_one()
-        assert (leftover_jobs, leftover_uploads) == (0, 0), "an API test left upload data behind"
+            leftover_sections = connection.execute(text("SELECT count(*) FROM document_sections")).scalar_one()
+        assert (leftover_jobs, leftover_uploads, leftover_sections) == (0, 0, 0), "a test left upload data behind"
 
 
 class ApiHarness:
-    def __init__(self, world: World, tmp_path: Path, *, max_upload_bytes: int = 25 * 1024 * 1024) -> None:
+    def __init__(
+        self,
+        world: World,
+        tmp_path: Path,
+        *,
+        max_upload_bytes: int = 25 * 1024 * 1024,
+        publisher=_UNSET,
+        bind: bool = True,
+    ) -> None:
         self.world = world
         self.session_factory: sessionmaker[Session] = sessionmaker(bind=world.engine, autoflush=False)
         self.upload_root = tmp_path / "uploads"
         self.settings = Settings(upload_dir=self.upload_root, max_upload_bytes=max_upload_bytes)
         self.storage = LocalFileStorage(self.upload_root)
-        self.app = create_app(self.settings, session_factory=self.session_factory, storage=self.storage)
+        if bind:
+            bind_storage(world.engine, self.upload_root)
+        self.publisher = RecordingPublisher() if publisher is _UNSET else publisher
+        self.app = create_app(
+            self.settings, session_factory=self.session_factory, storage=self.storage, publisher=self.publisher
+        )
         self.principal: CurrentUser | None = None
         self.app.dependency_overrides[get_current_user] = self._current_user
         self.client = TestClient(self.app)
@@ -165,9 +228,15 @@ class ApiHarness:
         return self.client.get(self.path(course_id))
 
     def stored_files(self) -> list[Path]:
+        """Stored originals: files below the root, except .incoming and the root's own
+        housekeeping files (the M3 identity marker and .incoming.lock)."""
         if not self.upload_root.exists():
             return []
-        return sorted(p for p in self.upload_root.rglob("*") if p.is_file() and INCOMING_DIR not in p.parts)
+        return sorted(
+            p
+            for p in self.upload_root.rglob("*")
+            if p.is_file() and INCOMING_DIR not in p.parts and p.parent != self.upload_root
+        )
 
     def incoming_files(self) -> list[Path]:
         incoming = self.upload_root / INCOMING_DIR

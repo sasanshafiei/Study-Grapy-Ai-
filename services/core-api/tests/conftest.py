@@ -4,6 +4,10 @@ They need a disposable PostgreSQL database; scripts/test_migrations.sh creates
 one and runs the whole suite. Without TEST_DATABASE_URL / TEST_DATABASE_TOKEN
 the database tests are skipped and only the tests that need no database run.
 See tests/disposable_db.py for the safety checks.
+
+The broker tests (M3) also need the disposable Redis the runner starts
+(TEST_REDIS_URL / TEST_REDIS_TOKEN, checked by tests/disposable_redis.py);
+without it they are skipped.
 """
 
 from __future__ import annotations
@@ -17,13 +21,15 @@ from sqlalchemy import create_engine, event, pool, text
 from sqlalchemy.engine import Connection, Engine
 
 from tests.alembic_cli import head_revision, run_alembic
-from tests.api_support import ApiHarness, World
+from tests.api_support import ApiHarness, World, bind_storage
 from tests.disposable_db import (
     DisposableTarget,
     MissingTestDatabase,
     target_from_env,
     verify_connection,
 )
+from tests.disposable_redis import DisposableRedis, MissingTestRedis, redis_target_from_env, verify_redis
+from tests.worker_support import CeleryProcess, Infra
 
 
 @pytest.fixture(scope="session")
@@ -187,3 +193,43 @@ def make_api(world: World, tmp_path) -> Iterator[Callable[..., ApiHarness]]:
     finally:
         for harness in harnesses:
             harness.client.close()
+
+
+# --- M3: broker and real worker processes -----------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def disposable_redis() -> DisposableRedis:
+    try:
+        target = redis_target_from_env(os.environ)
+    except MissingTestRedis as exc:
+        pytest.skip(f"needs a disposable Redis ({exc}); run services/core-api/scripts/test_migrations.sh")
+    verify_redis(target)  # NotDisposableRedis is an error, never a skip
+    return target
+
+
+@pytest.fixture
+def infra(world, disposable_target, disposable_redis, tmp_path) -> Infra:
+    """A bound upload store, unique queues and the verified targets, for workers and publishers."""
+    upload_dir = tmp_path / "store"
+    bind_storage(world.engine, upload_dir)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    return Infra(
+        database_url=disposable_target.url.render_as_string(hide_password=False),
+        database_marker=disposable_target.marker,
+        redis_url=disposable_redis.url,
+        upload_dir=upload_dir,
+        work_dir=work_dir,
+    )
+
+
+@pytest.fixture
+def celery_processes(world) -> Iterator[list[CeleryProcess]]:
+    """Processes registered here are stopped when the test ends, before its rows are deleted."""
+    processes: list[CeleryProcess] = []
+    try:
+        yield processes
+    finally:
+        for process in processes:
+            process.stop()
