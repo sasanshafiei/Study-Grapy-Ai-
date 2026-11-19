@@ -6,8 +6,11 @@ job. ingest_upload() orders the steps so that a committed document always
 points to a stored file, and so that a failure only ever removes files this
 operation created:
 
-1. Validate the name and declared type, then stream the body into a staged
-   temporary file (size limit, SHA-256, PDF signature) and fsync it.
+1. Validate the name and declared type; check that the upload directory is
+   the store this database is bound to (storage identity,
+   app/storage_identity.py), else 503 before any file is written; then
+   stream the body into a staged temporary file (size limit, SHA-256, PDF
+   signature) and fsync it.
 2. Open the write transaction: record this connection's backend identity,
    re-check course access with FOR SHARE locks, look for a duplicate, insert
    the document and its queued parse job. A unique violation of the
@@ -22,8 +25,11 @@ operation created:
      return 202. Rolled back: remove the file this operation placed. Not
      determinable: keep the file, log a reconciliation event and answer 503.
 
-The jobs are only recorded. Nothing is published to Redis and no worker
-consumes them yet (M3).
+Publishing the parse job is not part of this function: once it returns (the
+commit is confirmed), the router schedules app.ingestion.dispatch.
+publish_new_job to run after the response. If that publication fails or never
+happens (broker down, process crash), the dispatch sweep publishes the job
+from the table; an unconfirmed (503) upload is never published here.
 """
 
 from __future__ import annotations
@@ -50,7 +56,9 @@ from ..schemas.documents import (
     public_origin,
     public_status,
 )
+from .. import storage_identity
 from ..storage import LocalFileStorage, StagedFile, StorageError, storage_key
+from ..storage_identity import StorageIdentityError
 from ..uploads import FileFacts, check_declared_type, copy_and_inspect, normalize_filename
 from . import course_access
 
@@ -92,6 +100,10 @@ def storage_failed() -> ApiError:
     return ApiError(500, "storage_error", "The file could not be saved. Try again later.")
 
 
+def storage_unavailable() -> ApiError:
+    return ApiError(503, "storage_unavailable", "Uploads are temporarily unavailable. Try again later.")
+
+
 def upload_unconfirmed() -> ApiError:
     return ApiError(
         503,
@@ -112,6 +124,10 @@ def read_failed(exc: SQLAlchemyError) -> ApiError:
 
 def list_documents(session_factory: sessionmaker[Session], user: CurrentUser, course_id: uuid.UUID) -> list[DocumentItem]:
     job_running = exists().where(IngestionJob.document_id == Document.id, IngestionJob.status == "running")
+    # Parsing finished; indexing (M4) has not: still processing, never ready.
+    parsed = exists().where(
+        IngestionJob.document_id == Document.id, IngestionJob.kind == "parse", IngestionJob.status == "succeeded"
+    )
     query = (
         select(
             Document.id,
@@ -126,6 +142,7 @@ def list_documents(session_factory: sessionmaker[Session], user: CurrentUser, co
             Document.error_message,
             User.display_name,
             job_running.label("job_running"),
+            parsed.label("parsed"),
         )
         .outerjoin(User, User.id == Document.uploaded_by)
         .where(Document.course_id == course_id)
@@ -144,7 +161,7 @@ def list_documents(session_factory: sessionmaker[Session], user: CurrentUser, co
             title=row.title,
             origin=public_origin(row.origin),
             kind=public_kind(row.kind, row.origin),
-            status=public_status(row.status, job_running=row.job_running),
+            status=public_status(row.status, job_running=row.job_running, parsed=row.parsed),
             pages=row.page_count,
             source_name=None,  # filled from sources once harvesting exists
             url=row.url,
@@ -160,13 +177,42 @@ def list_documents(session_factory: sessionmaker[Session], user: CurrentUser, co
 # --- upload --------------------------------------------------------------------------------
 
 
-def authorize_upload(session_factory: sessionmaker[Session], user: CurrentUser, course_id: uuid.UUID) -> None:
-    """Checked before the request body is read; re-checked inside the write transaction."""
+def authorize_upload(
+    session_factory: sessionmaker[Session],
+    user: CurrentUser,
+    course_id: uuid.UUID,
+    storage: LocalFileStorage | None = None,
+) -> None:
+    """Checked before the request body is read; re-checked inside the write transaction.
+
+    With `storage`, also checks (after access, so callers without access
+    learn nothing about storage) that the upload store is available.
+    """
     try:
         with session_factory() as session:
             course_access.require_upload(session, user, course_id)
+            if storage is not None:
+                _verify_store(session, storage)
     except SQLAlchemyError as exc:
         log.exception("upload authorization failed course_id=%s", course_id)
+        raise read_failed(exc) from None
+
+
+def _verify_store(session: Session, storage: LocalFileStorage) -> None:
+    try:
+        storage_identity.verify(session, storage)
+    except StorageIdentityError as exc:
+        log.error("upload_storage_unavailable reason=%s", exc)
+        raise storage_unavailable() from None
+
+
+def require_upload_store(session_factory: sessionmaker[Session], storage: LocalFileStorage) -> None:
+    """503 unless the upload directory is the store this database is bound to."""
+    try:
+        with session_factory() as session:
+            _verify_store(session, storage)
+    except SQLAlchemyError as exc:
+        log.exception("upload storage check failed")
         raise read_failed(exc) from None
 
 
@@ -181,6 +227,7 @@ def ingest_upload(
 ) -> DocumentUploadResponse:
     name = normalize_filename(incoming.filename)
     mime_type = check_declared_type(name, incoming.content_type)
+    require_upload_store(session_factory, storage)  # authoritative check, right before writing
     document_id = uuid.uuid4()
     key = storage_key(course_id, document_id)
     try:
