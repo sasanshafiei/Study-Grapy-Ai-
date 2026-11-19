@@ -38,5 +38,5 @@ jobs:
     - name: Run test scripts
       run: |
         # search for test scripts and run them one-by-one
-        for f in ./services/scripts/test_*.sh; do bash "$f" -v; done
-        for f in ./services/scripts/*_test.sh; do bash "$f" -v; done
+        for f in ./services/*/scripts/test_*.sh; do bash "$f" -v; done
+        for f in ./services/*/scripts/*_test.sh; do bash "$f" -v; done
