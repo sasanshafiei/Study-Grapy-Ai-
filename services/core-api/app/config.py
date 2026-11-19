@@ -86,6 +86,34 @@ class Settings(BaseSettings):
     maintenance_task_soft_time_limit_seconds: int = Field(default=100, ge=1)
     maintenance_task_time_limit_seconds: int = Field(default=120, ge=2)
 
+    # --- AI indexing (M4, see docs/ai-indexing-integration.md) -------------------------
+    # Off by default. While off, index jobs stay queued: they are not published,
+    # not claimed and consume no attempt; documents stay `processing`.
+    indexing_enabled: bool = False
+    index_queue: str = Field(default="ingestion.index", pattern=QUEUE_NAME_PATTERN)
+    # Bearer credential the AI service expects (proposal, docs/ai-indexing-integration.md).
+    # Required by the index worker while indexing is enabled; never logged or shown.
+    ai_service_token: SecretStr | None = None
+    # HTTP bounds of one index request. Connect and read are *inactivity* timeouts
+    # (per socket operation, restarted by every byte that arrives). The request
+    # deadline is only checked between body reads, after the headers arrived; it
+    # does not bound the connect, send or header phases. The only absolute bound
+    # is the index task's Celery limits (soft raises, hard kills the pool process).
+    ai_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    ai_read_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    ai_request_deadline_seconds: float = Field(default=150.0, gt=0, le=3600)
+    # Largest request body sent (canonical JSON, bytes) and response body accepted.
+    index_max_payload_bytes: int = Field(default=16 * MIB, ge=1024, le=256 * MIB)
+    index_max_response_bytes: int = Field(default=64 * 1024, ge=1024, le=MIB)
+    # Readiness probe (GET capabilities, made inside the index task, never at worker
+    # start-up): short inactivity timeouts, not a hard deadline; a result is reused
+    # for this long per worker process, so an unavailable service is not asked again
+    # for every job.
+    ai_probe_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    ai_probe_cache_seconds: float = Field(default=30.0, ge=0, le=3600)
+    index_task_soft_time_limit_seconds: int = Field(default=240, ge=2)
+    index_task_time_limit_seconds: int = Field(default=270, ge=3)
+
     @model_validator(mode="after")
     def _ordered_limits(self) -> "Settings":
         """parse timeout < soft limit < hard limit (< lease), visibility timeout above both."""
@@ -101,7 +129,27 @@ class Settings(BaseSettings):
             raise ValueError("RETRY_BACKOFF_MAX_SECONDS must not be below RETRY_BACKOFF_BASE_SECONDS")
         if self.parse_queue == self.maintenance_queue:
             raise ValueError("PARSE_QUEUE and MAINTENANCE_QUEUE must differ")
+        if self.index_queue in (self.parse_queue, self.maintenance_queue):
+            raise ValueError("INDEX_QUEUE must differ from PARSE_QUEUE and MAINTENANCE_QUEUE")
+        # Sanity relation for well-behaved peers (probe + one request); a slow peer is
+        # bounded only by the Celery limits, see AiIndexClient's module docstring.
+        if not (
+            self.ai_probe_timeout_seconds + self.ai_request_deadline_seconds + self.ai_read_timeout_seconds
+            < self.index_task_soft_time_limit_seconds
+            < self.index_task_time_limit_seconds
+        ):
+            raise ValueError(
+                "AI_PROBE_TIMEOUT_SECONDS + AI_REQUEST_DEADLINE_SECONDS + AI_READ_TIMEOUT_SECONDS "
+                "< INDEX_TASK_SOFT_TIME_LIMIT_SECONDS < INDEX_TASK_TIME_LIMIT_SECONDS is required"
+            )
+        if self.broker_visibility_timeout_seconds <= 2 * self.index_task_time_limit_seconds:
+            raise ValueError("BROKER_VISIBILITY_TIMEOUT_SECONDS must exceed twice INDEX_TASK_TIME_LIMIT_SECONDS")
         return self
+
+    @property
+    def index_lease_seconds(self) -> int:
+        """Lease of a claimed index attempt: the index task's hard limit plus the same margin."""
+        return self.index_task_time_limit_seconds + self.job_lease_margin_seconds
 
     @property
     def job_lease_seconds(self) -> int:
