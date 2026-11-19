@@ -2,11 +2,14 @@
 
     celery -A app.worker worker -Q ingestion.parse        (parse worker)
     celery -A app.worker worker -Q ingestion.maintenance  (maintenance worker)
+    celery -A app.worker worker -Q ingestion.index        (index worker, M4; no upload volume)
     celery -A app.worker beat                              (scheduler, one instance)
 
-Tasks are thin: they validate their message and call app.ingestion. A parse
-message is exactly {"job_id": "<canonical uuid>"}; maintenance messages carry
-nothing. Anything else is logged and dropped, never interpreted.
+Tasks are thin: they validate their message and call app.ingestion or
+app.indexing. Parse and index messages are exactly {"job_id": "<canonical
+uuid>"}; maintenance messages carry nothing. Anything else is logged and
+dropped, never interpreted. The start-up checks depend on the worker's role,
+derived from the queues it consumes (app.ingestion.runtime.worker_role).
 """
 
 from __future__ import annotations
@@ -16,8 +19,9 @@ import os
 
 from celery import signals
 
-from .celery_app import DISPATCH_TASK, PARSE_TASK, RECONCILE_TASK, RECOVER_TASK, make_celery
+from .celery_app import DISPATCH_TASK, INDEX_TASK, PARSE_TASK, RECONCILE_TASK, RECOVER_TASK, make_celery
 from .config import settings
+from .indexing import pipeline as index_pipeline
 from .ingestion import dispatch, jobs, pipeline, reconcile, runtime
 
 log = logging.getLogger(__name__)
@@ -25,9 +29,21 @@ log = logging.getLogger(__name__)
 celery_app = make_celery(settings)
 
 
+def _consumed_queues(worker) -> set[str]:
+    consume_from = getattr(getattr(getattr(worker, "app", None), "amqp", None), "queues", None)
+    selected = getattr(consume_from, "consume_from", None)
+    return set(selected or ())
+
+
+def _role_preflight(worker) -> None:
+    role = runtime.worker_role(_consumed_queues(worker), settings)
+    log.info("worker role: %s", role)
+    runtime.preflight_for_role(role, settings, os.environ)
+
+
 @signals.worker_init.connect
-def _worker_preflight(**_):
-    runtime.exit_on_failure(runtime.worker_preflight, settings, os.environ)
+def _worker_preflight(sender=None, **_):
+    runtime.exit_on_failure(_role_preflight, sender)
 
 
 @signals.beat_init.connect
@@ -61,6 +77,20 @@ def parse_document(*args, **kwargs):
     return None
 
 
+@celery_app.task(
+    name=INDEX_TASK,
+    soft_time_limit=settings.index_task_soft_time_limit_seconds,
+    time_limit=settings.index_task_time_limit_seconds,
+)
+def index_document(*args, **kwargs):
+    job_id = runtime.parse_job_id(args, kwargs)
+    if job_id is None:
+        log.error("task_rejected task=%s reason=invalid_message", INDEX_TASK)
+        return None
+    index_pipeline.run_index_job(job_id, runtime.index_context(settings, celery_app))
+    return None
+
+
 _MAINTENANCE_LIMITS = {
     "soft_time_limit": settings.maintenance_task_soft_time_limit_seconds,
     "time_limit": settings.maintenance_task_time_limit_seconds,
@@ -71,8 +101,15 @@ _MAINTENANCE_LIMITS = {
 def dispatch_parse_jobs(*args, **kwargs):
     if _no_arguments(DISPATCH_TASK, args, kwargs):
         ctx = runtime.context(settings, celery_app)
-        result = dispatch.sweep(ctx.session_factory, runtime.publisher(settings, celery_app), settings)
+        publisher = runtime.publisher(settings, celery_app)
+        result = dispatch.sweep(ctx.session_factory, publisher, settings)
         log.info("dispatch_sweep published=%d released=%d skipped=%s", result.published, result.released, result.skipped)
+        if settings.indexing_enabled:
+            result = dispatch.sweep_index(ctx.session_factory, publisher, settings)
+            log.info(
+                "index_dispatch_sweep published=%d released=%d skipped=%s",
+                result.published, result.released, result.skipped,
+            )  # fmt: skip
 
 
 @celery_app.task(name=RECOVER_TASK, **_MAINTENANCE_LIMITS)
@@ -81,6 +118,10 @@ def recover_stale_parse_jobs(*args, **kwargs):
         ctx = runtime.context(settings, celery_app)
         result = jobs.recover_expired_leases(ctx.session_factory, settings)
         log.info("lease_recovery requeued=%d failed=%d", len(result.requeued), len(result.failed))
+        # Index attempts are recovered whether or not indexing is enabled now: a
+        # running attempt whose lease expired is dead either way.
+        result = jobs.recover_expired_leases(ctx.session_factory, settings, kind="index")
+        log.info("index_lease_recovery requeued=%d failed=%d", len(result.requeued), len(result.failed))
 
 
 @celery_app.task(name=RECONCILE_TASK, **_MAINTENANCE_LIMITS)

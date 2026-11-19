@@ -1,4 +1,4 @@
-"""Celery configuration shared by the worker, Beat and the publishers (API and dispatch sweep).
+"""Celery configuration shared by the workers, Beat and the publishers (API and dispatch sweep).
 
 Building the app connects to nothing. Choices (docs/document-processing.md):
 
@@ -24,6 +24,8 @@ from celery import Celery
 from .config import Settings
 
 PARSE_TASK = "ingestion.parse_document"
+# M4: published to the index queue only while INDEXING_ENABLED; consumed by the index worker.
+INDEX_TASK = "ingestion.index_document"
 DISPATCH_TASK = "ingestion.dispatch_parse_jobs"
 RECOVER_TASK = "ingestion.recover_stale_parse_jobs"
 RECONCILE_TASK = "ingestion.reconcile_files"
@@ -80,6 +82,7 @@ def make_celery(settings: Settings) -> Celery:
         task_create_missing_queues=True,
         task_routes={
             PARSE_TASK: {"queue": settings.parse_queue},
+            INDEX_TASK: {"queue": settings.index_queue},
             **{name: {"queue": settings.maintenance_queue} for name in MAINTENANCE_TASKS},
         },
         timezone="UTC",

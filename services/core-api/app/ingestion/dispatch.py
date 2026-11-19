@@ -1,4 +1,8 @@
-"""Publishing parse jobs: bounded broker I/O and the dispatch sweep over the job table.
+"""Publishing parse and index jobs: bounded broker I/O and the dispatch sweeps over the job table.
+
+Index jobs (M4) use the same reservation, release and broker rules on their
+own queue, through sweep_index, which publishes nothing while
+INDEXING_ENABLED is false (the jobs stay queued and keep their attempts).
 
 ingestion_jobs is the durable outbox. A message is only a hint that a job may
 be claimable; losing one costs latency, never a job, and a duplicate costs
@@ -54,7 +58,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..celery_app import PARSE_TASK, broker_transport_options
+from ..celery_app import INDEX_TASK, PARSE_TASK, broker_transport_options
 from ..config import Settings
 
 log = logging.getLogger(__name__)
@@ -70,6 +74,12 @@ class Publisher(Protocol):
     def publish_parse(self, job_id: uuid.UUID) -> None: ...
 
     def parse_queue_depth(self) -> int: ...
+
+
+class IndexPublisher(Protocol):
+    def publish_index(self, job_id: uuid.UUID) -> None: ...
+
+    def index_queue_depth(self) -> int: ...
 
 
 class CeleryPublisher:
@@ -120,47 +130,55 @@ class CeleryPublisher:
                     log.debug("closing a broker connection failed", exc_info=True)
         raise PublishError(f"broker operation failed: {type(last).__name__ if last else 'deadline'}") from last
 
-    def publish_parse(self, job_id: uuid.UUID) -> None:
-        queue = self._settings.parse_queue
-
+    def _publish(self, task: str, queue: str, job_id: uuid.UUID) -> None:
         def send(connection) -> None:
             channel = connection.default_channel  # connects: one attempt, bounded by the timeouts
             producer = connection.Producer(channel=channel)
-            self._app.send_task(
-                PARSE_TASK, kwargs={"job_id": str(job_id)}, queue=queue, producer=producer, retry=False
-            )
+            self._app.send_task(task, kwargs={"job_id": str(job_id)}, queue=queue, producer=producer, retry=False)
 
         self._with_connection(send)
 
-    def parse_queue_depth(self) -> int:
-        queue = self._settings.parse_queue
-
+    def _depth(self, queue: str) -> int:
         def size(connection) -> int:
             return int(connection.default_channel.queue_declare(queue=queue, passive=False).message_count)
 
         return self._with_connection(size)
 
+    def publish_parse(self, job_id: uuid.UUID) -> None:
+        self._publish(PARSE_TASK, self._settings.parse_queue, job_id)
+
+    def parse_queue_depth(self) -> int:
+        return self._depth(self._settings.parse_queue)
+
+    def publish_index(self, job_id: uuid.UUID) -> None:
+        self._publish(INDEX_TASK, self._settings.index_queue, job_id)
+
+    def index_queue_depth(self) -> int:
+        return self._depth(self._settings.index_queue)
+
 
 # --- reservations -----------------------------------------------------------------------------
 
 _ELIGIBLE = (
-    "kind = 'parse' AND status = 'queued' AND attempt_count < max_attempts AND available_at <= now() "
+    "kind = :kind AND status = 'queued' AND attempt_count < max_attempts AND available_at <= now() "
     "AND (last_dispatched_at IS NULL OR last_dispatched_at <= now() - :redispatch * interval '1 second')"
 )
 
 
-def reserve_job(session: Session, job_id: uuid.UUID, settings: Settings) -> datetime | None:
+def reserve_job(session: Session, job_id: uuid.UUID, settings: Settings, kind: str = "parse") -> datetime | None:
     """Reserve one job for publication; the reservation timestamp, or None if not eligible."""
     return session.execute(
         text(
             f"UPDATE ingestion_jobs SET last_dispatched_at = now(), updated_at = now() "
             f"WHERE id = :job_id AND {_ELIGIBLE} RETURNING last_dispatched_at"
         ),
-        {"job_id": job_id, "redispatch": settings.redispatch_after_seconds},
+        {"job_id": job_id, "redispatch": settings.redispatch_after_seconds, "kind": kind},
     ).scalar_one_or_none()
 
 
-def reserve_batch(session: Session, limit: int, settings: Settings) -> tuple[list[uuid.UUID], datetime | None]:
+def reserve_batch(
+    session: Session, limit: int, settings: Settings, kind: str = "parse"
+) -> tuple[list[uuid.UUID], datetime | None]:
     """Reserve up to `limit` eligible jobs (oldest first), skipping rows other sessions hold."""
     rows = session.execute(
         text(
@@ -176,7 +194,7 @@ def reserve_batch(session: Session, limit: int, settings: Settings) -> tuple[lis
             RETURNING j.id, j.last_dispatched_at
             """
         ),
-        {"limit": limit, "redispatch": settings.redispatch_after_seconds},
+        {"limit": limit, "redispatch": settings.redispatch_after_seconds, "kind": kind},
     ).all()
     if not rows:
         return [], None
@@ -282,4 +300,38 @@ def sweep(session_factory: sessionmaker[Session], publisher: Publisher, settings
             return SweepResult(published, released)
         published += 1
         log.info("dispatch_published job_id=%s source=sweep", job_id)
+    return SweepResult(published, 0)
+
+
+def sweep_index(session_factory: sessionmaker[Session], publisher: IndexPublisher, settings: Settings) -> SweepResult:
+    """Publish eligible queued index jobs (bounded batch), only while indexing is enabled.
+
+    The AI service is not contacted here: readiness is decided by the index
+    worker before it claims, so a message for a job that cannot be indexed
+    yet costs one cached readiness check and no attempt.
+    """
+    if not settings.indexing_enabled:
+        return SweepResult(0, 0, "indexing_disabled")
+    try:
+        depth = publisher.index_queue_depth()
+    except PublishError as exc:
+        log.warning("index_dispatch_sweep_skipped reason=broker_unavailable error=%s", exc)
+        return SweepResult(0, 0, "broker_unavailable")
+    room = settings.dispatch_max_queue_depth - depth
+    if room <= 0:
+        log.info("index_dispatch_sweep_skipped reason=queue_full depth=%d", depth)
+        return SweepResult(0, 0, "queue_full")
+    with session_factory() as session:
+        job_ids, reserved_at = reserve_batch(session, min(settings.dispatch_batch_size, room), settings, "index")
+        session.commit()
+    published = 0
+    for index, job_id in enumerate(job_ids):
+        try:
+            publisher.publish_index(job_id)
+        except PublishError as exc:
+            released = release_reservations(session_factory, job_ids[index:], reserved_at, settings)
+            log.warning("index_dispatch_sweep_interrupted published=%d released=%d error=%s", published, released, exc)
+            return SweepResult(published, released)
+        published += 1
+        log.info("dispatch_published kind=index job_id=%s source=sweep", job_id)
     return SweepResult(published, 0)

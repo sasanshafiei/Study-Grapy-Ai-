@@ -27,6 +27,7 @@ reconciliation (Beat, hourly) ─► remove provably abandoned temp files, repor
 | `worker` | `celery -A app.worker worker -Q ingestion.parse -c 2` | `ingestion.parse` | DB, Redis, uploads volume |
 | `worker-maintenance` | `celery -A app.worker worker -Q ingestion.maintenance -c 2` | `ingestion.maintenance` | DB, Redis, uploads volume |
 | `beat` | `celery -A app.worker beat -s /tmp/celerybeat-schedule` | publishes to `ingestion.maintenance` | Redis only |
+| `worker-index` (M4) | `celery -A app.worker worker -Q ingestion.index -c 2` | `ingestion.index` | DB, Redis, AI service; **no** uploads volume |
 
 All three use the core-api image and code; there is no separate worker image or
 dependency set (`services/worker/` only holds a pointer README). Maintenance tasks run
@@ -248,7 +249,9 @@ it read, so concurrent schedulers are safe.
   absolute bound for the sweep is the maintenance task's Celery hard time limit (120 s:
   the pool process is killed and replaced); that is why the API does not publish by
   default.
-- `index` jobs are never published or claimed in M3.
+- `index` jobs are never published or claimed in M3. Since M4 they are published by
+  `sweep_index` on the same reservation rules, only while `INDEXING_ENABLED` is true
+  (see `docs/ai-indexing-integration.md`).
 
 ## PDF extraction (`app/ingestion/extraction.py`, `extract_child.py`)
 
@@ -323,7 +326,7 @@ nothing.
 | `pending` | a job of the document is running | `processing` |
 | `pending` | a parse job succeeded (sections stored, indexing pending) | `processing` |
 | `pending` | otherwise (parse job queued or waiting to retry) | `queued` |
-| `indexed` | | `ready` (set by M4 only) |
+| `indexed` | | `ready` (set by M4 only, after a confirmed, digest-verified indexing) |
 | `failed` | | `failed` with `error` |
 | `stale` | | `failed` (unchanged from M2) |
 

@@ -153,6 +153,7 @@ class Infra:
     work_dir: Path
     parse_queue: str = field(default_factory=lambda: f"test.{uuid.uuid4().hex}.parse")
     maintenance_queue: str = field(default_factory=lambda: f"test.{uuid.uuid4().hex}.maintenance")
+    index_queue: str = field(default_factory=lambda: f"test.{uuid.uuid4().hex}.index")
 
     def settings(self, **overrides) -> Settings:
         values = dict(
@@ -161,6 +162,7 @@ class Infra:
             upload_dir=self.upload_dir,
             parse_queue=self.parse_queue,
             maintenance_queue=self.maintenance_queue,
+            index_queue=self.index_queue,
             broker_connect_timeout_seconds=2,
             broker_socket_timeout_seconds=3,
         )
@@ -180,6 +182,7 @@ class Infra:
             "UPLOAD_DIR": str(self.upload_dir),
             "PARSE_QUEUE": self.parse_queue,
             "MAINTENANCE_QUEUE": self.maintenance_queue,
+            "INDEX_QUEUE": self.index_queue,
             "RETRY_BACKOFF_BASE_SECONDS": "0",
             "RETRY_BACKOFF_MAX_SECONDS": "0",
             "PUBLISH_RETRY_DELAY_SECONDS": "0",

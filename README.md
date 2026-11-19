@@ -52,7 +52,10 @@ curl localhost:8001/health        # mock ai-service up
 The document workers (`worker`, `worker-maintenance`, `beat`) exit until the schema
 is at head; restart them after migrating (`docker compose up -d`). Redis is not
 published on the host (the workers trust what it hands them); see
-[docs/document-processing.md](docs/document-processing.md).
+[docs/document-processing.md](docs/document-processing.md). The index worker
+(`worker-index`) claims nothing while `INDEXING_ENABLED` is false (the default); the
+proposed AI indexing interface is in
+[docs/ai-indexing-integration.md](docs/ai-indexing-integration.md).
 
 Interactive API docs: http://localhost:8000/docs and http://localhost:8001/docs
 

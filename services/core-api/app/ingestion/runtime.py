@@ -26,6 +26,19 @@ Start-up checks (worker_preflight), run before the worker consumes anything:
 - The storage identity is checked and reported; it is not required at start
   (an operator may initialize the store after starting the worker), because
   every claim checks it again and fails closed.
+
+Worker roles (M4). The role follows from the queues a worker consumes,
+which Celery has selected before worker_init:
+- processing (parse and/or maintenance queues): the checks above, unchanged.
+- index (exactly the index queue, nothing else): DATABASE_URL, REDIS_URL and
+  AI_SERVICE_URL (plus AI_SERVICE_TOKEN while indexing is enabled); the same
+  database checks; a valid AI_SERVICE_URL. Start-up makes NO network call
+  to the AI service: a probe here would run outside any Celery time limit.
+  Readiness is probed inside the index task, at claim time (cached per
+  process), where the task's soft and hard limits apply. It never needs,
+  reads or checks the upload store.
+A worker that consumes the index queue together with any other queue is
+refused: the roles need different credentials and mounts.
 """
 
 from __future__ import annotations
@@ -45,6 +58,7 @@ from .. import storage_identity
 from ..config import Settings
 from ..migration_safety import UnsafeMigrationTarget, describe_target, resolve_migration_url, verify_connection
 from ..storage import LocalFileStorage
+from ..indexing.client import AiIndexClient, InvalidServiceUrl, parse_service_url
 from .dispatch import CeleryPublisher
 from .pipeline import WorkerContext
 
@@ -52,6 +66,10 @@ REQUIRED_SCHEMA_REVISION = "0003"
 REQUIRE_COMMENT_ENV = "DATABASE_REQUIRE_COMMENT"
 WORKER_ENVIRONMENT = ("DATABASE_URL", "REDIS_URL", "UPLOAD_DIR")
 BEAT_ENVIRONMENT = ("REDIS_URL",)
+INDEX_WORKER_ENVIRONMENT = ("DATABASE_URL", "REDIS_URL", "AI_SERVICE_URL")
+MIN_TOKEN_LENGTH = 32
+ROLE_PROCESSING = "processing"
+ROLE_INDEX = "index"
 EX_CONFIG = 78
 
 log = logging.getLogger(__name__)
@@ -149,6 +167,55 @@ def worker_preflight(settings: Settings, environ: Mapping[str, str] = os.environ
         engine.dispose()
 
 
+def worker_role(queues, settings: Settings) -> str:
+    """The role of a worker consuming `queues` (names); refuses mixing the index queue with others."""
+    names = set(queues or ())
+    if settings.index_queue not in names:
+        return ROLE_PROCESSING
+    if names != {settings.index_queue}:
+        raise PreflightError(
+            f"the index queue {settings.index_queue!r} must be consumed by a dedicated worker "
+            f"(this worker also consumes {', '.join(sorted(names - {settings.index_queue}))})"
+        )
+    return ROLE_INDEX
+
+
+def check_ai_settings(settings: Settings, environ: Mapping[str, str]) -> None:
+    try:
+        parse_service_url(environ.get("AI_SERVICE_URL", settings.ai_service_url))
+    except InvalidServiceUrl as exc:
+        raise PreflightError(str(exc)) from None
+    if settings.indexing_enabled:
+        token = environ.get("AI_SERVICE_TOKEN", "")
+        if not token.strip():
+            raise PreflightError("AI_SERVICE_TOKEN must be set explicitly while INDEXING_ENABLED is true")
+        if len(token) < MIN_TOKEN_LENGTH or token != token.strip():
+            raise PreflightError(f"AI_SERVICE_TOKEN must be at least {MIN_TOKEN_LENGTH} characters, without spaces")
+
+
+def index_worker_preflight(settings: Settings, environ: Mapping[str, str] = os.environ) -> None:
+    """Start-up checks of the index worker; it never touches the upload store."""
+    require_environment(environ, INDEX_WORKER_ENVIRONMENT)
+    check_ai_settings(settings, environ)
+    target = database_target(environ)
+    check_database(target)
+    log.info(
+        "index worker preflight: database %s verified at revision %s",
+        describe_target(target.url), REQUIRED_SCHEMA_REVISION,
+    )  # fmt: skip
+    if not settings.indexing_enabled:
+        log.warning("index worker preflight: INDEXING_ENABLED is false; index jobs will not be claimed")
+        return
+    log.info("index worker preflight: AI service readiness is checked per claim, inside the index task")
+
+
+def preflight_for_role(role: str, settings: Settings, environ: Mapping[str, str] = os.environ) -> None:
+    if role == ROLE_INDEX:
+        index_worker_preflight(settings, environ)
+    else:
+        worker_preflight(settings, environ)
+
+
 def beat_preflight(environ: Mapping[str, str] = os.environ) -> None:
     require_environment(environ, BEAT_ENVIRONMENT)
 
@@ -165,14 +232,14 @@ def exit_on_failure(check, *args) -> None:
 
 # --- per-process context ---------------------------------------------------------------------
 
-_state: dict = {"pid": None, "engine": None, "context": None, "publisher": None}
+_state: dict = {"pid": None, "engine": None, "context": None, "publisher": None, "index_context": None}
 
 
 def reset_after_fork() -> None:
     engine = _state.get("engine")
     if engine is not None:
         engine.dispose(close=False)  # never close connections that belong to the parent
-    _state.update(pid=None, engine=None, context=None, publisher=None)
+    _state.update(pid=None, engine=None, context=None, publisher=None, index_context=None)
 
 
 def _ensure_process_state(settings: Settings, celery_app, environ: Mapping[str, str]) -> None:
@@ -189,12 +256,29 @@ def _ensure_process_state(settings: Settings, celery_app, environ: Mapping[str, 
             settings=settings,
         ),
         publisher=CeleryPublisher(celery_app, settings),
+        index_context=None,
     )
 
 
 def context(settings: Settings, celery_app, environ: Mapping[str, str] = os.environ) -> WorkerContext:
     _ensure_process_state(settings, celery_app, environ)
     return _state["context"]
+
+
+def index_context(settings: Settings, celery_app, environ: Mapping[str, str] = os.environ):
+    """The index worker's per-process context: verified database sessions and the AI client.
+
+    No storage object is involved. The readiness cache lives in the client,
+    so it is per pool process.
+    """
+    from ..indexing.pipeline import IndexContext
+
+    _ensure_process_state(settings, celery_app, environ)
+    if _state["index_context"] is None:
+        _state["index_context"] = IndexContext(
+            session_factory=_state["context"].session_factory, settings=settings, client=AiIndexClient(settings)
+        )
+    return _state["index_context"]
 
 
 def publisher(settings: Settings, celery_app, environ: Mapping[str, str] = os.environ) -> CeleryPublisher:

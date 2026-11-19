@@ -1,8 +1,9 @@
 """Operator commands. Run them inside a core-api or worker container:
 
-    python -m app.ingestion.admin preflight
+    python -m app.ingestion.admin preflight [--role processing|index]
     python -m app.ingestion.admin init-storage --database NAME [--adopt-existing [--allow-missing]]
     python -m app.ingestion.admin retry-parse --database NAME DOCUMENT_ID
+    python -m app.ingestion.admin retry-index --database NAME DOCUMENT_ID
 
 preflight runs the worker start-up checks and changes nothing.
 
@@ -67,9 +68,9 @@ def guarded_session_factory(database: str, environ: Mapping[str, str]):
     return sessionmaker(bind=engine, autoflush=False), engine, describe_target(url)
 
 
-def cmd_preflight(_args, environ: Mapping[str, str]) -> int:
-    runtime.worker_preflight(Settings(), environ)
-    print("preflight passed")
+def cmd_preflight(args, environ: Mapping[str, str]) -> int:
+    runtime.preflight_for_role(args.role, Settings(), environ)
+    print(f"preflight passed (role {args.role})")
     return 0
 
 
@@ -111,10 +112,34 @@ def cmd_retry_parse(args, environ: Mapping[str, str]) -> int:
     return 0
 
 
+def cmd_retry_index(args, environ: Mapping[str, str]) -> int:
+    try:
+        document_id = uuid.UUID(args.document_id)
+    except ValueError:
+        raise AdminError("DOCUMENT_ID must be a UUID") from None
+    session_factory: sessionmaker[Session]
+    session_factory, engine, target = guarded_session_factory(args.database, environ)
+    try:
+        job_id = jobs.retry_index(session_factory, document_id)
+    except jobs.RetryRefused as exc:
+        raise AdminError(f"retry refused: {exc}") from None
+    finally:
+        engine.dispose()
+    print(
+        f"queued index job {job_id} for document {document_id} in {target}; no extraction is repeated; "
+        "the dispatch sweep publishes it while indexing is enabled"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None, environ: Mapping[str, str] = os.environ) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.ingestion.admin")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("preflight", help="run the worker start-up checks (changes nothing)")
+    pre = sub.add_parser("preflight", help="run the worker start-up checks (changes nothing)")
+    pre.add_argument(
+        "--role", choices=(runtime.ROLE_PROCESSING, runtime.ROLE_INDEX), default=runtime.ROLE_PROCESSING,
+        help="processing (parse/maintenance worker, default) or index (index worker)",
+    )
     init = sub.add_parser("init-storage", help="bind the database to the upload store (explicit, once)")
     init.add_argument("--database", required=True, help="the database name DATABASE_URL must point to")
     init.add_argument("--adopt-existing", action="store_true", help="the store or the database already holds uploads")
@@ -122,10 +147,18 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] = os.environ)
     retry = sub.add_parser("retry-parse", help="queue a new parse job for a failed document")
     retry.add_argument("--database", required=True, help="the database name DATABASE_URL must point to")
     retry.add_argument("document_id")
+    retry_index = sub.add_parser("retry-index", help="queue a new index job for a document whose indexing failed")
+    retry_index.add_argument("--database", required=True, help="the database name DATABASE_URL must point to")
+    retry_index.add_argument("document_id")
     args = parser.parse_args(argv)
     if getattr(args, "allow_missing", False) and not args.adopt_existing:
         parser.error("--allow-missing requires --adopt-existing")
-    commands = {"preflight": cmd_preflight, "init-storage": cmd_init_storage, "retry-parse": cmd_retry_parse}
+    commands = {
+        "preflight": cmd_preflight,
+        "init-storage": cmd_init_storage,
+        "retry-parse": cmd_retry_parse,
+        "retry-index": cmd_retry_index,
+    }
     try:
         return commands[args.command](args, environ)
     except (AdminError, UnsafeMigrationTarget, runtime.PreflightError, storage_identity.StorageIdentityError) as exc:
