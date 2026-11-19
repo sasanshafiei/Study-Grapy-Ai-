@@ -1,4 +1,7 @@
-fastapi==0.115.5
+fastapi==0.141.1
+# Pinned directly: core-api imports Starlette's multipart parser. 1.3.1 fixes every
+# published Starlette advisory (incl. CVE-2025-54121) and is the release FastAPI 0.141.1 shipped with.
+starlette==1.3.1
 uvicorn[standard]==0.32.1
 sqlalchemy==2.0.36
 psycopg[binary]==3.2.3
@@ -7,3 +10,5 @@ pydantic-settings==2.6.1
 celery==5.4.0
 redis==5.2.0
 httpx==0.28.1
+alembic==1.20.1
+python-multipart==0.0.34
