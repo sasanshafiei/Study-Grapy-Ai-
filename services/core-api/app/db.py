@@ -1,3 +1,4 @@
+from fastapi import Request
 from sqlalchemy import MetaData, create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
@@ -33,9 +34,13 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
-def get_db():
-    """FastAPI dependency: yields a DB session and always closes it."""
-    db = SessionLocal()
+def get_db(request: Request):
+    """FastAPI dependency: yields a DB session and always closes it.
+
+    The session comes from the application's own factory (app.state, set by
+    create_app), so an app built for tests never reaches the default engine.
+    """
+    db = request.app.state.session_factory()
     try:
         yield db
     finally:
