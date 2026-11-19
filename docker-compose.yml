@@ -93,6 +93,32 @@ services:
       --without-mingle --without-gossip --without-heartbeat -l INFO
     stop_grace_period: 130s
 
+  # AI indexing (M4, docs/ai-indexing-integration.md). Consumes only the index
+  # queue; it needs the database, Redis and the AI service, never the upload
+  # volume. INDEXING_ENABLED stays false until AI-1 ships a compatible,
+  # non-mock service and AI_SERVICE_TOKEN is provisioned: while false it
+  # claims nothing, and the mock ai-service above is refused anyway.
+  worker-index:
+    build: ./services/core-api
+    command: >-
+      celery -A app.worker worker -Q ingestion.index -c 2 -P prefork -n index@%h
+      --without-mingle --without-gossip --without-heartbeat -l INFO
+    environment:
+      DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+      REDIS_URL: redis://redis:6379/0
+      AI_SERVICE_URL: http://ai-service:8000
+      INDEXING_ENABLED: "false"
+      ENVIRONMENT: development
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./services/core-api:/app
+    # Longer than the index task's hard time limit (270 s).
+    stop_grace_period: 300s
+
   beat:
     build: ./services/core-api
     # Exactly one Beat. Its schedule state is disposable (interval schedules),
