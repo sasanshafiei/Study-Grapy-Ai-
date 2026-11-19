@@ -28,6 +28,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8000
       ENVIRONMENT: development
+      UPLOAD_DIR: /data/uploads
     ports:
       - "8000:8000"
     depends_on:
@@ -37,6 +38,9 @@ services:
         condition: service_started
     volumes:
       - ./services/core-api:/app
+      # Uploaded originals. Persistent, outside the code mount, never served
+      # statically. The M3 worker mounts the same volume.
+      - uploads:/data/uploads
 
   ai-service:
     build: ./services/ai-service
@@ -47,3 +51,4 @@ services:
 
 volumes:
   pgdata:
+  uploads:
