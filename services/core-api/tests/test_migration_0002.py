@@ -290,6 +290,11 @@ def test_uploader_must_exist(head_database, rolled_back_transaction):
 
 def _job(connection, document_id, **columns):
     values = {"document_id": document_id, "kind": "parse", **columns}
+    if values.get("status") == "running" and "attempt_token" not in values:
+        # Since revision 0003 a running job also needs an attempt token and a lease
+        # (ingestion_jobs_lease_check). The tests here are about the 0002 checks, so
+        # running rows get both, and the 0002 constraint under test is the one violated.
+        values.update(attempt_token=uuid.uuid4(), lease_expires_at="2026-11-19T13:00:00Z")
     names = ", ".join(values)
     placeholders = ", ".join(f":{c}" for c in values)
     return connection.execute(
