@@ -41,7 +41,7 @@ check everything is wired:
 
 ```bash
 docker compose exec core-api alembic upgrade head
-docker compose exec core-api alembic current   # expect: 0001 (head)
+docker compose exec core-api alembic current   # expect: 0002 (head)
 
 curl localhost:8000/health        # core-api up
 curl localhost:8000/health/db     # db reachable + pgvector installed

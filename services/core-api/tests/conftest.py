@@ -13,10 +13,10 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 
 import pytest
-from sqlalchemy import create_engine, pool
+from sqlalchemy import create_engine, pool, text
 from sqlalchemy.engine import Connection, Engine
 
-from tests.alembic_cli import run_alembic
+from tests.alembic_cli import head_revision, run_alembic
 from tests.disposable_db import (
     DisposableTarget,
     MissingTestDatabase,
@@ -116,3 +116,20 @@ def alembic(disposable_engine: Engine, disposable_target: DisposableTarget, alem
         return result
 
     return run
+
+
+@pytest.fixture
+def head_database(disposable_engine: Engine, disposable_target: DisposableTarget, alembic) -> None:
+    """The disposable database at the current head; migrates only when it is not there.
+
+    Other tests move the shared database between revisions, so this is checked
+    per test rather than once per session.
+    """
+    with disposable_engine.connect() as connection:
+        verify_connection(connection, disposable_target)
+        current = None
+        if connection.execute(text("SELECT to_regclass('public.alembic_version') IS NOT NULL")).scalar_one():
+            current = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
+        connection.rollback()
+    if current != head_revision():
+        alembic("upgrade", "head")
