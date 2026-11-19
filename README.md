@@ -36,10 +36,12 @@ cd studygraph
 docker compose up --build
 ```
 
-Then, in another terminal, create the tables and check everything is wired:
+Then, in another terminal, create the tables with the Alembic migrations and
+check everything is wired:
 
 ```bash
-docker compose exec core-api python init_db.py
+docker compose exec core-api alembic upgrade head
+docker compose exec core-api alembic current   # expect: 0001 (head)
 
 curl localhost:8000/health        # core-api up
 curl localhost:8000/health/db     # db reachable + pgvector installed
@@ -47,6 +49,12 @@ curl localhost:8001/health        # mock ai-service up
 ```
 
 Interactive API docs: http://localhost:8000/docs and http://localhost:8001/docs
+
+The old `python init_db.py` step is deprecated and no longer creates tables. If
+your database was created with it, adopt it instead of re-running anything; see
+[docs/database-migrations.md](docs/database-migrations.md). That document also
+covers writing migrations and running the migration tests
+(`services/core-api/scripts/test_migrations.sh`).
 
 ## Repo layout
 
@@ -81,7 +89,7 @@ docs/decisions/   one short file per locked decision
 
 ## Next steps for the backend (CE-1)
 
-1. Swap `init_db.py` for **Alembic** migrations (`alembic init`, autogenerate from models).
+1. ~~Swap `init_db.py` for **Alembic** migrations~~ Done: see [docs/database-migrations.md](docs/database-migrations.md).
 2. Add routers under `app/routers/`: `documents` (upload), `courses`, `chat` (proxy to ai-service).
 3. Stand up the Celery worker and a first parse job.
 4. Build the external-source connectors (OpenStax, Wikipedia) and the harvester.

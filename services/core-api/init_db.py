@@ -1,21 +1,32 @@
-"""Dev-only: create all tables from the SQLAlchemy models.
+"""Deprecated: the schema is now managed by Alembic migrations.
 
-Run once after the stack is up:
-    docker compose exec core-api python init_db.py
+This script used to run Base.metadata.create_all(), which builds tables
+without recording any migration revision. On a database that Alembic manages
+that silently produces an untracked schema, so it no longer creates anything.
+It is kept only so the old command fails with directions instead.
 
-This is a shortcut for getting started. Before anyone stores data they care
-about, replace it with Alembic migrations (see README) so schema changes are
-versioned and reversible.
+See docs/database-migrations.md.
 """
 
-from app import models  # noqa: F401  (registers the tables on Base)
-from app.db import Base, engine
+import sys
+
+MESSAGE = """\
+init_db.py is deprecated and no longer creates tables.
+
+Create or update the schema with Alembic, inside the core-api container:
+
+    docker compose exec core-api alembic upgrade head
+
+If your database was created earlier by init_db.py, do not run `upgrade` on it
+yet: follow "Adopting a database created by init_db.py" in
+docs/database-migrations.md.
+"""
 
 
-def main():
-    Base.metadata.create_all(engine)
-    print("Tables created:", ", ".join(sorted(Base.metadata.tables)))
+def main() -> int:
+    print(MESSAGE, file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
