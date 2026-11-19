@@ -13,10 +13,11 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 
 import pytest
-from sqlalchemy import create_engine, pool
+from sqlalchemy import create_engine, event, pool, text
 from sqlalchemy.engine import Connection, Engine
 
-from tests.alembic_cli import run_alembic
+from tests.alembic_cli import head_revision, run_alembic
+from tests.api_support import ApiHarness, World
 from tests.disposable_db import (
     DisposableTarget,
     MissingTestDatabase,
@@ -116,3 +117,73 @@ def alembic(disposable_engine: Engine, disposable_target: DisposableTarget, alem
         return result
 
     return run
+
+
+# --- API tests --------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def api_engine(disposable_target: DisposableTarget) -> Iterator[Engine]:
+    """Engine for the application under test; every new connection re-verifies the database."""
+    engine = create_engine(disposable_target.url, poolclass=pool.NullPool)
+
+    @event.listens_for(engine, "engine_connect")
+    def _verify(connection: Connection) -> None:
+        verify_connection(connection, disposable_target)
+        connection.rollback()
+
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def head_database(disposable_engine: Engine, disposable_target: DisposableTarget, alembic) -> None:
+    """The disposable database at the current head; migrates only when it is not there.
+
+    Other tests move the shared database between revisions, so this is checked
+    per test rather than once per session.
+    """
+    with disposable_engine.connect() as connection:
+        verify_connection(connection, disposable_target)
+        current = None
+        if connection.execute(text("SELECT to_regclass('public.alembic_version') IS NOT NULL")).scalar_one():
+            current = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
+        connection.rollback()
+    if current != head_revision():
+        alembic("upgrade", "head")
+
+
+@pytest.fixture
+def world(head_database, api_engine: Engine) -> Iterator[World]:
+    """Rows created by one test, deleted again when it ends (whatever happened)."""
+    created = World(api_engine)
+    try:
+        yield created
+    finally:
+        created.cleanup()
+
+
+@pytest.fixture
+def api(world: World, tmp_path) -> Iterator[ApiHarness]:
+    harness = ApiHarness(world, tmp_path)
+    try:
+        yield harness
+    finally:
+        harness.client.close()
+
+
+@pytest.fixture
+def make_api(world: World, tmp_path) -> Iterator[Callable[..., ApiHarness]]:
+    """Like `api`, with custom settings (e.g. a small upload limit)."""
+    harnesses: list[ApiHarness] = []
+
+    def build(**options) -> ApiHarness:
+        harness = ApiHarness(world, tmp_path / f"app{len(harnesses)}", **options)
+        harnesses.append(harness)
+        return harness
+
+    try:
+        yield build
+    finally:
+        for harness in harnesses:
+            harness.client.close()

@@ -10,6 +10,7 @@ Schema changes go through CE-1 (see `CONTRIBUTING.md`).
 | `alembic.ini` | Alembic settings. Deliberately has no database URL. |
 | `migrations/env.py` | Connects to `DATABASE_URL` after the safety checks below. |
 | `migrations/versions/0001_baseline_schema.py` | Baseline: the 11 original tables. |
+| `migrations/versions/0002_document_upload_ingestion.py` | Upload metadata on `documents`, `ingestion_jobs` (M2). |
 | `app/migration_safety.py` | Refuses unsafe migration targets. |
 | `app/db.py` | `Base` with the constraint naming convention. |
 | `tests/` + `scripts/test_migrations.sh` | Migration tests on a throwaway database. |
@@ -36,7 +37,7 @@ pass the same files to every command below.
 ```bash
 docker compose up -d --build                       # start the stack (rebuild after dependency changes)
 docker compose exec core-api alembic upgrade head  # create / update the schema
-docker compose exec core-api alembic current       # revision the database is at, e.g. "0001 (head)"
+docker compose exec core-api alembic current       # revision the database is at, e.g. "0002 (head)"
 docker compose exec core-api alembic history       # all revisions
 docker compose exec core-api alembic check         # models vs. database: expect "No new upgrade operations detected."
 docker compose exec core-api alembic upgrade head --sql   # print the SQL only, connect to nothing
@@ -46,6 +47,41 @@ A brand-new database volume needs nothing but `alembic upgrade head`.
 A database created earlier by `init_db.py` needs adopting first, see below. Running
 `upgrade` on it fails with `relation "users" already exists` and changes nothing
 (PostgreSQL runs the whole migration in one transaction).
+
+## Revision 0002: upload metadata and ingestion jobs
+
+Adds to `documents` the nullable columns `uploaded_by`, `original_filename`,
+`storage_key`, `mime_type`, `size_bytes`, `page_count`, `kind` and
+`error_message` (no defaults, so no table rewrite, and legacy rows stay as they
+are), CHECK constraints, the course-scoped dedup index and the `ingestion_jobs`
+table. See [document-ingestion.md](document-ingestion.md) for what they mean.
+
+**Upgrade preflight.** New CHECK constraints restrict `documents.origin` to
+`class | external | web_cache` and `documents.status` to
+`pending | indexed | failed | stale`. Before any change, the migration counts
+existing rows outside those values and, if there are any, stops with the counts
+(never the values). It does not modify data. Check a real database read-only
+before upgrading it:
+
+```bash
+docker compose exec -T db psql -U studygraph -d studygraph -X -At -c \
+  "SELECT count(*) FILTER (WHERE origin NOT IN ('class','external','web_cache')),
+          count(*) FILTER (WHERE status NOT IN ('pending','indexed','failed','stale'))
+   FROM documents"
+# expect: 0|0
+```
+
+**Downgrade guard.** `alembic downgrade 0001` (or `base`) is refused, before any
+change, while `ingestion_jobs` has rows or any document has upload metadata:
+dropping the columns would silently lose that data and leave the stored files
+unreferenced. There is deliberately no override flag. To downgrade, remove that
+data on purpose first (and decide what happens to the stored files). Without such
+data the downgrade restores the baseline schema exactly.
+
+**Offline SQL.** Both checks are `DO` blocks, so `alembic upgrade --sql` /
+`downgrade --sql` output contains them and they run wherever that SQL is executed
+later. Run that output as a script (`psql -f`); it contains `%` placeholders for
+PL/pgSQL `RAISE`, so do not pass it through a driver that interprets `%`.
 
 ## Safety guard: which database a migration may touch
 
@@ -216,6 +252,15 @@ database at head.
   - `compare_metadata` and `alembic check` are clean;
   - baseline data survives later upgrades;
   - a full downgrade with data and re-upgrade works and keeps the extension.
+- Revision `0002`:
+  - upgrading a database with representative legacy data keeps every row and
+    table OID and fills no new column;
+  - invalid legacy `origin`/`status` values stop the upgrade before any change;
+  - every new CHECK, unique, foreign-key and cascade rule, including NULLs;
+  - a downgrade without upload data restores the scaffold schema exactly; with
+    upload data it is refused and nothing changes;
+  - the offline SQL carries both checks, and the rendered upgrade still refuses
+    invalid data when executed.
 - Baseline `0001`:
   - the catalog snapshot equals the scaffold;
   - PK, FK, unique, NOT NULL and default behaviour hold;
@@ -269,13 +314,13 @@ comparison output.
 3. **Verify, then continue normally.**
 
    ```bash
-   docker compose exec -T core-api alembic current   # 0001 (head) while 0001 is the newest revision
-   docker compose exec -T core-api alembic check     # No new upgrade operations detected.
+   docker compose exec -T core-api alembic current   # 0001 (later revisions are not applied yet)
    docker compose exec -T -e PYTHONDONTWRITEBYTECODE=1 core-api python -m tests.schema_snapshot --compare tests/fixtures/scaffold_schema.json
-   docker compose exec -T core-api alembic upgrade head   # applies any later revisions
+   docker compose exec -T core-api alembic upgrade head   # applies the later revisions (see 0002's preflight)
+   docker compose exec -T core-api alembic check     # No new upgrade operations detected.
    ```
 
-   Run the snapshot comparison before `upgrade head` if later revisions exist.
+   `alembic check` only passes at head, so run it after `upgrade head`.
    Rerunning the `pg_dump` comparison at this point should show no difference: the
    normalizer drops the `alembic_version` statements.
 

@@ -41,7 +41,7 @@ check everything is wired:
 
 ```bash
 docker compose exec core-api alembic upgrade head
-docker compose exec core-api alembic current   # expect: 0001 (head)
+docker compose exec core-api alembic current   # expect: 0002 (head)
 
 curl localhost:8000/health        # core-api up
 curl localhost:8000/health/db     # db reachable + pgvector installed
@@ -81,7 +81,7 @@ docs/decisions/   one short file per locked decision
 
 | Person | Role | First task |
 | --- | --- | --- |
-| You | CE-1 backend + ingestion | this scaffold, then real `/documents/upload` + parse job |
+| You | CE-1 backend + ingestion | this scaffold, then course document upload + parse job |
 | Friend A | CE-2 web | `create-next-app` in `apps/web`, login + chat page |
 | Friend B | CE-3 mobile + auth + devops | auth endpoints, CI, staging deploy, `create-expo-app` |
 | AI friend 1 | AI-1 retrieval + generation | replace mock `/index` + `/chat/answer` with the real thing |
@@ -90,7 +90,8 @@ docs/decisions/   one short file per locked decision
 ## Next steps for the backend (CE-1)
 
 1. ~~Swap `init_db.py` for **Alembic** migrations~~ Done: see [docs/database-migrations.md](docs/database-migrations.md).
-2. Add routers under `app/routers/`: `documents` (upload), `courses`, `chat` (proxy to ai-service).
+2. Add routers under `app/routers/`: ~~`documents` (upload, list)~~ done, see
+   [docs/document-ingestion.md](docs/document-ingestion.md); `courses`, `chat` (proxy to ai-service).
 3. Stand up the Celery worker and a first parse job.
 4. Build the external-source connectors (OpenStax, Wikipedia) and the harvester.
 
