@@ -11,12 +11,13 @@ stores the original file, computes its SHA-256, and records the document togethe
 with a **queued `parse` job** in one database transaction. Authorized users can
 list a course's documents.
 
-**Not implemented yet (M3 and later):** nothing publishes the job to Redis and no
-worker consumes it. No text is extracted, no sections are stored, nothing is
-indexed or available to retrieval. An uploaded document therefore stays `queued`
-until M3. Also not in M2: deleting, downloading or renaming documents, retrying
-jobs, formats other than PDF, OCR, malware scanning, external/harvested
-documents.
+**Processing (M3)** is described in [document-processing.md](document-processing.md):
+after the commit the job is published to Redis, a Celery worker parses the PDF into
+page-aware sections, and the document waits for indexing (M4) as `processing`. Nothing
+is indexed or available to retrieval yet. Still not implemented: deleting, downloading
+or renaming documents, formats other than PDF, OCR, malware scanning,
+external/harvested documents. M3 also adds one upload rule: the upload store must be
+the one the database is bound to, otherwise `503 storage_unavailable`.
 
 ## Endpoints
 
@@ -88,16 +89,18 @@ never included (they go to the server log).
 | File could not be stored | 500 | `storage_error` |
 | Database failure, rolled back | 500 | `upload_failed` |
 | Outcome could not be confirmed (see consistency) | 503 | `upload_unconfirmed` |
+| Upload store not the one the database is bound to (M3; after the access checks, before the body is read) | 503 | `storage_unavailable` |
 | Database unreachable while checking access or listing | 503 | `database_unavailable` |
 | Any other unexpected server error | 500 | `server_error` |
 
 A malformed course id in the path gets FastAPI's standard 422.
 
-## Public values (provisional mappings for M2)
+## Public values (provisional mappings, extended in M3)
 
 | `documents.status` | Condition | Public `status` |
 | --- | --- | --- |
 | `pending` | the document has a `running` job | `processing` |
+| `pending` | a parse job succeeded: parsed, waiting for indexing (M3) | `processing` |
 | `pending` | otherwise | `queued` |
 | `indexed` | | `ready` |
 | `failed` | | `failed`, `error` = `documents.error_message` |
@@ -113,7 +116,7 @@ A malformed course id in the path gets FastAPI's standard 422.
 - `added_by`: the uploader's `display_name`; `null` when there is no uploader.
 - `added_at`: `documents.created_at` in UTC (see timestamps).
 - `pages`: `documents.page_count` (filled by parsing, M3). `source_name`: always
-  `null` in M2.
+  `null` so far.
 
 ## Authentication and authorization
 
@@ -197,7 +200,7 @@ uploading (account disabled, ownership changed) is refused.
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| `UPLOAD_DIR` | `/data/uploads` | docker-compose mounts the named volume `uploads` here (core-api; the M3 worker will mount the same volume) |
+| `UPLOAD_DIR` | `/data/uploads` | docker-compose mounts the named volume `uploads` here (core-api and the M3 workers) |
 | `MAX_UPLOAD_BYTES` | `26214400` | see above |
 
 Layout: `<UPLOAD_DIR>/<course_id>/<document_id>.pdf`; files being received live
@@ -267,10 +270,11 @@ a real power loss.
 
 **Remaining windows (process crash, power loss).** A crash while receiving leaves a
 `.part` file in `.incoming`; a crash between placement and COMMIT leaves a stored
-file without a document row. Neither leaves a document without its file. M3 adds a
-reconciliation task: remove `.incoming` files older than a threshold, remove (or
-quarantine) stored files whose key has no document row after a grace period, and
-fail parse jobs whose file is missing. In M2 these are documented, not automated.
+file without a document row. Neither leaves a document without its file. M3's
+reconciliation (see [document-processing.md](document-processing.md)) removes
+temporary files only when they are provably abandoned (an ownership lock protocol, not
+age alone), and only reports stored files without a row and documents whose file is
+missing; a parse job whose file is missing from a verified store fails.
 
 ## Deduplication
 
@@ -284,8 +288,8 @@ Unique index `documents_course_id_content_hash_idx` on `(course_id, content_hash
   course is revealed;
 - legacy rows (no stored file) are outside the index, so their hash format does not
   matter and is not rewritten;
-- a `failed` document still counts: re-processing will be a job retry (M3), not a
-  re-upload.
+- a `failed` document still counts: re-processing is an operator retry
+  (`python -m app.ingestion.admin retry-parse`, M3), not a re-upload.
 
 ## Ingestion jobs
 
@@ -303,17 +307,13 @@ least one attempt; `failed` has `finished_at` (after `started_at` if it started)
 A partial unique index allows at most one `queued`/`running` job per document and
 kind; finished jobs are kept as history.
 
-Transitions (applied by M3 with conditional `UPDATE ... WHERE status = ...`):
-`queued → running` (claim, `attempt_count + 1`, `started_at`), `running →
-succeeded`, `running → queued` (retryable failure while attempts remain),
-`running → failed`, `failed → queued` (explicit retry only).
-
-**Dispatch in M3.** The job row is written in the same transaction as the document,
-so it cannot be lost between the API and the queue; the table is the outbox. M3
-publishes the job id after COMMIT, a Celery Beat sweep re-publishes `queued` jobs
-that have waited too long (covering a failed publish or a crash), and the worker's
-conditional claim makes duplicate deliveries harmless. Jobs stuck in `running` are
-recovered by `started_at` plus a timeout.
+Transitions (applied by M3 with conditional `UPDATE`s, fenced by an attempt token):
+`queued → running` (claim, `attempt_count + 1`, `started_at`, token, lease),
+`running → succeeded`, `running → queued` (retryable failure while attempts remain,
+with backoff), `running → failed`. A failed job stays failed: an operator retry
+creates a **new** job, so no attempt identity is ever reused. Revision 0003 adds the
+scheduling and fencing columns; the full state machine, dispatch and lease recovery
+are in [document-processing.md](document-processing.md).
 
 ## Dependencies
 
@@ -357,10 +357,11 @@ still run.
 - Only PDF is accepted for now. The file picker offers PDF, PPTX, DOCX, TXT and MD;
   the others get 415 `unsupported_file_type` with a readable message. Consider
   `accept=".pdf"` until more formats land.
-- Uploaded documents stay `queued` until M3, so the materials screen keeps polling
-  every 1.5 s while one is listed. The list query is cheap, but a back-off would help.
-- `processing` appears once a worker runs a job (M3). `stale` currently shows as
-  `failed` with an explanation.
+- Since M3, documents move from `queued` to `processing` (parsing, then waiting for
+  indexing) and stay `processing` until M4 indexes them, so the materials screen keeps
+  polling every 1.5 s while one is listed; a back-off would help. See the CE-2 notes
+  in [document-processing.md](document-processing.md). `stale` shows as `failed`
+  with an explanation.
 - `kind` can be `null` in the database for legacy and external rows; the API sends a
   display default. Making `kind` nullable in `types.ts` would be more honest.
 - Still missing on the server: `GET /courses` and `/auth/login` (needed before the
@@ -377,18 +378,19 @@ still run.
   `CurrentUser(id, role, status)`. No other module parses tokens.
 - Course-level checks (ownership, enrollment) live in `app/services/course_access.py`;
   please confirm this split matches "one current_user dependency".
-- Compose: the core-api service now mounts the named volume `uploads` at
-  `/data/uploads` and sets `UPLOAD_DIR`. The M3 worker needs the same mount.
-  Rebuild the core-api image (`python-multipart` was added; FastAPI and Starlette were upgraded).
+- Compose: the core-api service mounts the named volume `uploads` at `/data/uploads`
+  and sets `UPLOAD_DIR`; the M3 workers mount the same volume (CE-3 notes in
+  [document-processing.md](document-processing.md)).
 - Production proxy: body limit around 26 MB, timeouts and rate limiting.
 - CI: run `bash services/core-api/scripts/test_migrations.sh -v`; plain `pytest`
   skips every database test.
 
 ### AI-1 (indexing) — proposal, not a contract change
 
-- CE-1 parses; AI-1 chunks and embeds. In M3, CE-1 stores normalized
+- CE-1 parses; AI-1 chunks and embeds. Since M3, CE-1 stores normalized
   `document_sections` (`document_id`, `ordinal`, `text`, `locator` JSONB such as
-  `{"page": 6}`) and then calls the index endpoint.
+  `{"page": 6}`) and queues an `index` job; calling the index endpoint is M4
+  (see [document-processing.md](document-processing.md)).
 - Proposed `POST /ai/v1/index/documents` payload: `document_id`, `course_id`,
   `origin`, `title`, `url`, `licence`, `language`, and `sections: [{ordinal, text,
   locator}]`. Chunks keep `document_id`/`course_id`/`origin` and carry the

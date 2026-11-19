@@ -1,11 +1,16 @@
 # worker (CE-1)
 
-Celery workers for jobs that can't run inside a web request:
+The Celery workers live in the core-api codebase and image, not here: they share the
+models, storage, configuration and dependency set of `services/core-api`, so there is
+one image to build and no second copy of the schema code. Entry point:
+`services/core-api/app/worker.py`; logic in `services/core-api/app/ingestion/`.
 
-- parse uploaded PDF/PPTX into clean sections
-- call the AI service to index documents
-- the external-source harvester (Lane A)
-- scheduled jobs via Celery Beat (weekly re-harvest)
+- `ingestion.parse`: parse uploaded PDFs into page-aware sections (M3)
+- `ingestion.maintenance`: dispatch sweep, lease recovery, file reconciliation (M3), on
+  their own worker so long parses cannot starve them
+- Celery Beat: the maintenance schedule (one instance)
+- later: calling the AI service to index documents (M4), the external-source harvester
 
-Not built yet. Skeleton lands in week 2. Broker + result backend: the Redis
-instance from `docker-compose.yml` (`REDIS_URL`).
+Broker: the Redis instance from `docker-compose.yml` (`REDIS_URL`). There is no result
+backend: job state lives in PostgreSQL (`ingestion_jobs`). See
+[docs/document-processing.md](../../docs/document-processing.md).

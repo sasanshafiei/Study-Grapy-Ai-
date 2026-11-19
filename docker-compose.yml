@@ -1,3 +1,20 @@
+# Shared by the M3 worker services below.
+x-ingestion-worker: &ingestion-worker
+  build: ./services/core-api
+  environment:
+    DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+    REDIS_URL: redis://redis:6379/0
+    UPLOAD_DIR: /data/uploads
+    ENVIRONMENT: development
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_started
+  volumes:
+    - ./services/core-api:/app
+    - uploads:/data/uploads
+
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -18,8 +35,12 @@ services:
 
   redis:
     image: redis:7
-    ports:
-      - "6379:6379"
+    # No host port. Every service reaches Redis over the Compose network as
+    # redis:6379, and the M3 workers act on whatever this broker hands them, so
+    # it must not be reachable from outside without authentication. If you need
+    # it from the host (e.g. core-api run outside Docker), publish it on loopback
+    # only, in an untracked override file:
+    #   services: { redis: { ports: ["127.0.0.1:6379:6379"] } }
 
   core-api:
     build: ./services/core-api
@@ -48,6 +69,44 @@ services:
       - "8001:8000"
     volumes:
       - ./services/ai-service:/app
+
+  # --- Asynchronous document processing (M3, docs/document-processing.md) --------------
+  # Same image and code as core-api. They never run migrations: each worker
+  # checks the schema revision at start and exits (status 78) if it is not the
+  # one its code needs. No ports. Redis above is not published on the host;
+  # keep it that way, or loopback-only (see "Broker security" in the docs).
+  worker:
+    <<: *ingestion-worker
+    command: >-
+      celery -A app.worker worker -Q ingestion.parse -c 2 -P prefork -n parse@%h
+      --without-mingle --without-gossip --without-heartbeat -l INFO
+    # Longer than the parse task's hard time limit (180 s): a warm shutdown
+    # lets the running parse finish instead of leaving it to lease recovery.
+    stop_grace_period: 210s
+
+  worker-maintenance:
+    <<: *ingestion-worker
+    # Dispatch, lease recovery and file reconciliation, on their own queue and
+    # processes so that long parses can never starve them.
+    command: >-
+      celery -A app.worker worker -Q ingestion.maintenance -c 2 -P prefork -n maintenance@%h
+      --without-mingle --without-gossip --without-heartbeat -l INFO
+    stop_grace_period: 130s
+
+  beat:
+    build: ./services/core-api
+    # Exactly one Beat. Its schedule state is disposable (interval schedules),
+    # so it lives in the container's /tmp. It needs neither the database nor
+    # the upload volume.
+    command: celery -A app.worker beat -s /tmp/celerybeat-schedule --pidfile= -l INFO
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: development
+    depends_on:
+      redis:
+        condition: service_started
+    volumes:
+      - ./services/core-api:/app
 
 volumes:
   pgdata:
