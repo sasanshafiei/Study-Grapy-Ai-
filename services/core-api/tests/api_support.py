@@ -201,6 +201,15 @@ class World:
             )  # fmt: skip
             connection.execute(text(f"DELETE FROM chunks WHERE {doc_filter} OR course_id = ANY(:c)"), ids)
             connection.execute(text("DELETE FROM topics WHERE course_id = ANY(:c)"), ids)
+            # M6: a harvested resource's current-version key must be released before its documents can go
+            # (production code never deletes external documents one by one).
+            connection.execute(
+                text(
+                    "UPDATE external_resources SET current_document_id = NULL WHERE current_document_id IS NOT NULL "
+                    "AND (course_id = ANY(:c) OR source_id = ANY(:s) OR current_document_id = ANY(:d))"
+                ),
+                {"c": self.courses, "s": self.sources, "d": self.documents},
+            )
             if self.courses:
                 connection.execute(text("DELETE FROM documents WHERE course_id = ANY(:ids)"), {"ids": self.courses})
             if self.documents:

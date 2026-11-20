@@ -70,6 +70,11 @@ INDEXED_KEYS = frozenset(
      "section_count", "chunk_count", "replayed"}
 )  # fmt: skip
 CAPABILITY_KEYS = frozenset({"protocol", "service", "mock", "completion", "max_request_bytes"})
+# M6, backward compatible: an optional list of locator schemes the service indexes.
+# Absent (every M4 service) means ["page"] only; section-based documents are then
+# never sent. Any other extra key is still refused.
+OPTIONAL_CAPABILITY_KEYS = frozenset({"locators"})
+LOCATOR_SCHEMES = frozenset({"page", "section"})
 ERROR_KEYS = frozenset({"code", "message", "retryable"})
 
 
@@ -334,13 +339,14 @@ class Readiness:
     ready: bool
     reason: str
     max_request_bytes: int | None = None
+    locators: frozenset[str] = frozenset({"page"})
 
 
 def validate_capabilities(response: HttpResponse) -> Readiness:
     if response.status != 200:
         return Readiness(False, f"capabilities_http_{response.status}")
     body = _json_object(response)
-    if body is None or set(body) != CAPABILITY_KEYS:
+    if body is None or not CAPABILITY_KEYS <= set(body) <= CAPABILITY_KEYS | OPTIONAL_CAPABILITY_KEYS:
         return Readiness(False, "capabilities_invalid")
     if body["mock"] is not False:  # absent, true or not a boolean: refused
         return Readiness(False, "mock_service")
@@ -354,7 +360,16 @@ def validate_capabilities(response: HttpResponse) -> Readiness:
     limit = body["max_request_bytes"]
     if type(limit) is not int or limit < 1:
         return Readiness(False, "capabilities_invalid")
-    return Readiness(True, "ready", limit)
+    locators = body.get("locators", ["page"])
+    if (
+        not isinstance(locators, list)
+        or not all(isinstance(item, str) for item in locators)
+        or len(set(locators)) != len(locators)
+        or not set(locators) <= LOCATOR_SCHEMES
+        or "page" not in locators
+    ):
+        return Readiness(False, "capabilities_invalid")
+    return Readiness(True, "ready", limit, frozenset(locators))
 
 
 class AiIndexClient:

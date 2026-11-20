@@ -19,6 +19,17 @@ Identity.
   content, sends the same key. It never depends on job ids, attempt numbers or
   timestamps.
 
+Section locators (M6). A harvested external document (one with an
+external_document_versions row) is section-based: its sections carry
+{"anchor", "heading", "level"} locators, and its document object gains
+"locator_scheme": "section" and an "attribution" object (provider, page and
+revision identity, revision URL, licence URL, attribution text) taken from
+its immutable provenance row. Every other document keeps exactly the M4
+page-based body: the same keys, bytes, content digest and idempotency key as
+before (no new key is added to it). A service receives a section-based
+document only after it advertised "section" in its capabilities' optional
+"locators" list (app/indexing/client.py, app/indexing/pipeline.py).
+
 Nothing here talks to the network; load_content only reads.
 """
 
@@ -44,6 +55,11 @@ class InvalidIndexContent(ValueError):
     """The stored document cannot be expressed as a valid index request (permanent)."""
 
 
+LOCATOR_SCHEMES = ("page", "section")
+MAX_ANCHOR = 255
+_ATTRIBUTION_KEYS = ("page_id", "revision_id", "revision_url", "canonical_url", "licence_url", "attribution", "provider")
+
+
 @dataclass(frozen=True)
 class IndexRequest:
     document_id: uuid.UUID
@@ -52,6 +68,7 @@ class IndexRequest:
     idempotency_key: str
     section_count: int
     body: bytes  # canonical JSON
+    locator_scheme: str = "page"
 
     def __repr__(self) -> str:  # never dumps document text into logs
         return (
@@ -147,10 +164,67 @@ def _sections(rows: Sequence[Mapping], page_count: int | None) -> list[dict]:
     return sections
 
 
+def _section_sections(rows: Sequence[Mapping]) -> list[dict]:
+    if not rows:
+        raise InvalidIndexContent("the document has no sections")
+    sections = []
+    for expected, row in enumerate(rows):
+        ordinal, body, locator = row.get("ordinal"), row.get("text"), row.get("locator")
+        if type(ordinal) is not int or ordinal != expected:
+            raise InvalidIndexContent(f"section ordinals are not contiguous from 0 (at {expected})")
+        if not isinstance(body, str) or not body.strip():
+            raise InvalidIndexContent(f"section {expected} has no text")
+        if not isinstance(locator, Mapping) or set(locator) != {"anchor", "heading", "level"}:
+            raise InvalidIndexContent(f"section {expected} locator is not exactly {{anchor, heading, level}}")
+        anchor, heading, level = locator["anchor"], locator["heading"], locator["level"]
+        if type(level) is not int:
+            raise InvalidIndexContent(f"section {expected} level is not an integer")
+        if level == 0:
+            if expected != 0 or anchor is not None or heading is not None:
+                raise InvalidIndexContent(f"section {expected}: only the first section may be the lead")
+        elif 2 <= level <= 6:
+            for name, value in (("anchor", anchor), ("heading", heading)):
+                if not isinstance(value, str) or not value.strip() or len(value) > MAX_ANCHOR:
+                    raise InvalidIndexContent(f"section {expected} {name} is not a non-empty string")
+        else:
+            raise InvalidIndexContent(f"section {expected} level is not 0 or 2..6")
+        sections.append({"ordinal": ordinal, "locator": {"anchor": anchor, "heading": heading, "level": level}, "text": body})
+    return sections
+
+
+def _attribution(provenance: Mapping) -> dict:
+    if set(_ATTRIBUTION_KEYS) - set(provenance):
+        raise InvalidIndexContent("external provenance is incomplete")
+    for key in ("page_id", "revision_id"):
+        if type(provenance[key]) is not int or provenance[key] < 1:
+            raise InvalidIndexContent(f"{key} is not a positive integer")
+    result = {"page_id": provenance["page_id"], "revision_id": provenance["revision_id"]}
+    for key in ("revision_url", "canonical_url", "licence_url", "attribution", "provider"):
+        result[key] = _optional_str(provenance[key], key, 4096)
+        if not result[key]:
+            raise InvalidIndexContent(f"{key} is empty")
+    return result
+
+
 def build_request(metadata: Mapping, section_rows: Sequence[Mapping]) -> IndexRequest:
-    """Validate the content and build its canonical request. Pure and deterministic."""
+    """Validate the content and build its canonical request. Pure and deterministic.
+
+    metadata["_provenance"] (set by load_content for harvested documents)
+    selects the section scheme; without it the M4 page scheme applies, byte
+    for byte as before.
+    """
     document = _document(metadata)
-    sections = _sections(section_rows, document["page_count"])
+    provenance = metadata.get("_provenance")
+    if provenance is None:
+        scheme = "page"
+        sections = _sections(section_rows, document["page_count"])
+    else:
+        if document["origin"] != "external" or document["page_count"] is not None:
+            raise InvalidIndexContent("only fileless external documents are section-based")
+        scheme = "section"
+        document["locator_scheme"] = "section"
+        document["attribution"] = _attribution(provenance)
+        sections = _section_sections(section_rows)
     content = {"protocol": PROTOCOL, "document": document, "sections": sections}
     content_digest = hashlib.sha256(canonical_json(content)).hexdigest()
     key = idempotency_key(document["id"], document["course_id"], content_digest)
@@ -162,6 +236,7 @@ def build_request(metadata: Mapping, section_rows: Sequence[Mapping]) -> IndexRe
         idempotency_key=key,
         section_count=len(sections),
         body=body,
+        locator_scheme=scheme,
     )
 
 
@@ -175,6 +250,12 @@ _METADATA = text(
     "FROM documents WHERE id = :id"
 )
 _SECTIONS = "SELECT ordinal, text, locator FROM document_sections WHERE document_id = :id ORDER BY ordinal"
+# Immutable provenance of a harvested version (M6); its stale columns are not read.
+_PROVENANCE = text(
+    "SELECT v.page_id, v.revision_id, v.revision_url, v.canonical_url, v.licence_url, v.attribution, s.provider "
+    "FROM external_document_versions v JOIN documents d ON d.id = v.document_id "
+    "JOIN sources s ON s.id = d.source_id WHERE v.document_id = :id"
+)
 
 
 def load_content(session: Session, document_id: uuid.UUID, *, lock_sections: bool = False):
@@ -189,7 +270,12 @@ def load_content(session: Session, document_id: uuid.UUID, *, lock_sections: boo
         return None
     query = _SECTIONS + (" FOR SHARE" if lock_sections else "")
     sections = [dict(row) for row in session.execute(text(query), {"id": document_id}).mappings()]
-    return dict(metadata), sections
+    metadata = dict(metadata)
+    if metadata["origin"] == "external":
+        provenance = session.execute(_PROVENANCE, {"id": document_id}).mappings().one_or_none()
+        if provenance is not None:
+            metadata["_provenance"] = dict(provenance)
+    return metadata, sections
 
 
 def request_for(session: Session, document_id: uuid.UUID, *, lock_sections: bool = False) -> IndexRequest:

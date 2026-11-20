@@ -568,3 +568,15 @@ services' requirements into one environment does not work (different FastAPI ver
   locators) and calls `POST /ai/v1/index/documents`; only then does the document become
   `indexed`. Changing `contracts/ai-service.openapi.yaml` needs one CE and one AI
   approval; M3 does not change it.
+
+
+## M6 addendum: harvest worker role
+
+A worker consuming exactly `HARVEST_QUEUE` (`harvest.run`) has the role `harvest`
+(`app/ingestion/runtime.py`): it needs `DATABASE_URL` and `REDIS_URL`, the same
+database identity and revision checks (now `0005`), and while `HARVEST_ENABLED` a valid
+`HARVEST_USER_AGENT`; it needs no upload store and no AI service and makes no provider
+request at start-up. Mixing the harvest or index queue with any other queue is refused.
+The maintenance worker additionally runs `harvest.maintain` (Beat entry
+`harvest-maintenance`): lease recovery and history cleanup always, scheduling and
+dispatch only while `HARVEST_ENABLED`. See [external-harvesting.md](external-harvesting.md).
