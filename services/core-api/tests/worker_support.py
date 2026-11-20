@@ -73,9 +73,13 @@ def add_stored_document(
     title: str = "Lecture.pdf",
     with_file: bool = True,
     max_attempts: int | None = None,
+    document_id: uuid.UUID | None = None,
 ) -> StoredDocument:
-    """A document with a stored file and a queued parse job, as an upload leaves them."""
-    document_id = uuid.uuid4()
+    """A document with a stored file and a queued parse job, as an upload leaves them.
+
+    `document_id` pins the id (tests that depend on the id order); random otherwise.
+    """
+    document_id = document_id or uuid.uuid4()
     key = store_file(storage, course_id, document_id, data) if with_file else storage_key(course_id, document_id)
     with engine.begin() as connection:
         connection.execute(
