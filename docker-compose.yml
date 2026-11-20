@@ -119,6 +119,38 @@ services:
     # Longer than the index task's hard time limit (270 s).
     stop_grace_period: 300s
 
+  # External harvesting (M6, docs/external-harvesting.md). Consumes only the
+  # harvest queue, one slice at a time (concurrency 1: the provider budget and
+  # courtesy spacing assume a single serial requester per worker). Needs the
+  # database and Redis; never the upload volume, no ports. HARVEST_ENABLED stays
+  # false: while false it claims nothing and sends nothing. Activating it needs
+  # more than this flag (docs/external-harvesting.md, section 10): the SAME flag
+  # on worker-maintenance (schedules and dispatches runs), HARVEST_USER_AGENT
+  # with a real contact, an enabled provider source, an opted-in course,
+  # approved queries, and - outside this file - an infrastructure egress
+  # restriction for this service only (TCP 443 to the provider). Compose does
+  # not provide that restriction: the default network gives this container
+  # general outbound access.
+  worker-harvest:
+    build: ./services/core-api
+    command: >-
+      celery -A app.worker worker -Q harvest.run -c 1 -P prefork -n harvest@%h
+      --without-mingle --without-gossip --without-heartbeat -l INFO
+    environment:
+      DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+      REDIS_URL: redis://redis:6379/0
+      HARVEST_ENABLED: "false"
+      ENVIRONMENT: development
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./services/core-api:/app
+    # Longer than the harvest task's hard time limit (270 s).
+    stop_grace_period: 300s
+
   beat:
     build: ./services/core-api
     # Exactly one Beat. Its schedule state is disposable (interval schedules),
