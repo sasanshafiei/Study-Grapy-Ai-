@@ -155,6 +155,64 @@ class Settings(BaseSettings):
     chat_max_citations: int = Field(default=16, ge=1, le=64)
     chat_max_topics: int = Field(default=16, ge=0, le=256)
 
+    # --- external harvesting (M6, see docs/external-harvesting.md) -----------------------
+    # Off by default. While off nothing is scheduled, dispatched or claimed and no
+    # provider request is made; lease recovery and history cleanup still run.
+    # Course opt-in and provider activation are separate, explicit operator steps.
+    harvest_enabled: bool = False
+    harvest_queue: str = Field(default="harvest.run", pattern=QUEUE_NAME_PATTERN)
+    # Wikimedia User-Agent policy: "<client>/<version> (<contact URL or e-mail>) ...".
+    # No default: required (and validated) by the harvest worker while harvesting is on.
+    harvest_user_agent: str | None = None
+    # HTTP bounds of one provider request (inactivity timeouts plus a deadline checked
+    # between body reads; the absolute bound is the harvest task's Celery limits).
+    harvest_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    harvest_read_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    harvest_request_deadline_seconds: float = Field(default=30.0, gt=0, le=300)
+    harvest_max_response_bytes: int = Field(default=4 * MIB, ge=64 * 1024, le=32 * MIB)
+    harvest_maxlag_seconds: int = Field(default=5, ge=1, le=60)
+    # Retry-After values are honoured up to this; a longer one blocks the source this long.
+    harvest_retry_after_max_seconds: int = Field(default=86400, ge=60, le=7 * 86400)
+    harvest_throttle_default_seconds: int = Field(default=300, ge=1, le=86400)
+    # Celery limits of the harvest task; the run lease is derived from them.
+    harvest_task_soft_time_limit_seconds: int = Field(default=240, ge=30)
+    harvest_task_time_limit_seconds: int = Field(default=270, ge=31)
+    # Finite work: per claim (slice), per run, per course.
+    harvest_slice_max_requests: int = Field(default=20, ge=2, le=500)  # >= one info + one content request
+    harvest_run_max_requests: int = Field(default=300, ge=1, le=10_000)
+    harvest_run_max_claims: int = Field(default=40, ge=1, le=1000)
+    harvest_run_max_failures: int = Field(default=3, ge=1, le=20)
+    harvest_max_queries_per_course: int = Field(default=20, ge=1, le=200)
+    harvest_candidates_per_query: int = Field(default=5, ge=1, le=20)
+    harvest_max_candidates_per_run: int = Field(default=60, ge=1, le=1000)
+    harvest_max_accepted_per_run: int = Field(default=20, ge=1, le=500)
+    harvest_refresh_batch_size: int = Field(default=20, ge=1, le=50)
+    harvest_default_max_active_documents: int = Field(default=20, ge=1, le=500)
+    # Quality gates on normalized article text.
+    harvest_min_document_chars: int = Field(default=1500, ge=100, le=100_000)
+    harvest_max_document_chars: int = Field(default=300_000, ge=1000, le=5_000_000)
+    harvest_max_sections: int = Field(default=200, ge=1, le=5000)
+    # A page reported missing is marked stale only after a second observation this much later.
+    harvest_missing_confirm_seconds: int = Field(default=86400, ge=60, le=30 * 86400)
+    # Run backoff after a failed attempt, and target backoff after a failed run.
+    harvest_retry_backoff_seconds: int = Field(default=120, ge=1, le=86400)
+    harvest_failed_run_backoff_seconds: int = Field(default=3600, ge=60, le=7 * 86400)
+    # Defaults written by `init-source` into the provider budget (operators may lower them).
+    harvest_budget_window_seconds: int = Field(default=60, ge=1, le=86400)
+    harvest_budget_max_requests: int = Field(default=30, ge=1, le=100_000)
+    harvest_budget_min_interval_ms: int = Field(default=1000, ge=0, le=600_000)
+    # A budget wait up to this long is slept inside the slice; a longer one yields the run.
+    harvest_budget_max_wait_seconds: float = Field(default=3.0, ge=0, le=30)
+    harvest_maintenance_interval_seconds: float = Field(default=60, gt=0)
+    harvest_dispatch_batch_size: int = Field(default=10, ge=1, le=1000)
+    harvest_redispatch_after_seconds: int = Field(default=600, ge=1)
+    harvest_history_retention_days: int = Field(default=30, ge=1, le=3650)
+    harvest_history_cleanup_batch: int = Field(default=500, ge=1, le=10_000)
+    # External index jobs the AI service cannot take yet (no advertised section
+    # locator support, source disabled, course opted out) are deferred this long,
+    # without being claimed and without consuming an attempt.
+    external_index_defer_seconds: int = Field(default=900, ge=10, le=86400)
+
     @model_validator(mode="after")
     def _ordered_limits(self) -> "Settings":
         """parse timeout < soft limit < hard limit (< lease), visibility timeout above both."""
@@ -185,6 +243,25 @@ class Settings(BaseSettings):
             )
         if self.broker_visibility_timeout_seconds <= 2 * self.index_task_time_limit_seconds:
             raise ValueError("BROKER_VISIBILITY_TIMEOUT_SECONDS must exceed twice INDEX_TASK_TIME_LIMIT_SECONDS")
+        if self.harvest_queue in (self.parse_queue, self.maintenance_queue, self.index_queue):
+            raise ValueError("HARVEST_QUEUE must differ from PARSE_QUEUE, MAINTENANCE_QUEUE and INDEX_QUEUE")
+        if not (
+            self.harvest_request_deadline_seconds + self.harvest_read_timeout_seconds
+            < self.harvest_task_soft_time_limit_seconds
+            < self.harvest_task_time_limit_seconds
+        ):
+            raise ValueError(
+                "HARVEST_REQUEST_DEADLINE_SECONDS + HARVEST_READ_TIMEOUT_SECONDS "
+                "< HARVEST_TASK_SOFT_TIME_LIMIT_SECONDS < HARVEST_TASK_TIME_LIMIT_SECONDS is required"
+            )
+        if self.broker_visibility_timeout_seconds <= 2 * self.harvest_task_time_limit_seconds:
+            raise ValueError("BROKER_VISIBILITY_TIMEOUT_SECONDS must exceed twice HARVEST_TASK_TIME_LIMIT_SECONDS")
+        if self.harvest_min_document_chars >= self.harvest_max_document_chars:
+            raise ValueError("HARVEST_MIN_DOCUMENT_CHARS must be below HARVEST_MAX_DOCUMENT_CHARS")
+        if self.harvest_user_agent is not None:
+            from .harvest.transport import validate_user_agent  # local: harvest imports Settings
+
+            validate_user_agent(self.harvest_user_agent)  # raises ValueError
         from .chat.scopes import parse_enabled_scopes  # local: chat imports Settings
 
         parse_enabled_scopes(self.chat_enabled_scopes)  # raises ValueError for an unknown or unavailable scope
@@ -198,6 +275,21 @@ class Settings(BaseSettings):
     def index_lease_seconds(self) -> int:
         """Lease of a claimed index attempt: the index task's hard limit plus the same margin."""
         return self.index_task_time_limit_seconds + self.job_lease_margin_seconds
+
+    @property
+    def harvest_lease_seconds(self) -> int:
+        """Lease of a claimed harvest slice: the harvest task's hard limit plus the same margin."""
+        return self.harvest_task_time_limit_seconds + self.job_lease_margin_seconds
+
+    @property
+    def harvest_slice_seconds(self) -> float:
+        """No new provider request is started after this much of a slice (soft limit minus one request)."""
+        return max(
+            1.0,
+            self.harvest_task_soft_time_limit_seconds
+            - self.harvest_request_deadline_seconds
+            - self.harvest_read_timeout_seconds,
+        )
 
     @property
     def job_lease_seconds(self) -> int:

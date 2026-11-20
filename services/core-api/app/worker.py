@@ -3,6 +3,7 @@
     celery -A app.worker worker -Q ingestion.parse        (parse worker)
     celery -A app.worker worker -Q ingestion.maintenance  (maintenance worker)
     celery -A app.worker worker -Q ingestion.index        (index worker, M4; no upload volume)
+    celery -A app.worker worker -Q harvest.run --concurrency 1   (harvest worker, M6; provider egress only)
     celery -A app.worker beat                              (scheduler, one instance)
 
 Tasks are thin: they validate their message and call app.ingestion or
@@ -19,8 +20,19 @@ import os
 
 from celery import signals
 
-from .celery_app import DISPATCH_TASK, INDEX_TASK, PARSE_TASK, RECONCILE_TASK, RECOVER_TASK, make_celery
+from .celery_app import (
+    DISPATCH_TASK,
+    HARVEST_MAINTAIN_TASK,
+    HARVEST_TASK,
+    INDEX_TASK,
+    PARSE_TASK,
+    RECONCILE_TASK,
+    RECOVER_TASK,
+    make_celery,
+)
 from .config import settings
+from .harvest import executor as harvest_executor
+from .harvest import maintenance as harvest_maintenance
 from .indexing import pipeline as index_pipeline
 from .ingestion import dispatch, jobs, pipeline, reconcile, runtime
 
@@ -134,3 +146,29 @@ def reconcile_files(*args, **kwargs):
             "reconcile skipped=%s temp_removed=%d orphans=%d missing=%d errors=%d",
             report.skipped, removed, len(report.orphans), len(report.missing), len(report.errors),
         )
+
+
+@celery_app.task(
+    name=HARVEST_TASK,
+    soft_time_limit=settings.harvest_task_soft_time_limit_seconds,
+    time_limit=settings.harvest_task_time_limit_seconds,
+)
+def harvest_run_slice(*args, **kwargs):
+    run_id = runtime.run_id_of(args, kwargs)
+    if run_id is None:
+        log.error("task_rejected task=%s reason=invalid_message", HARVEST_TASK)
+        return None
+    harvest_executor.run_harvest(run_id, runtime.harvest_context(settings, celery_app))
+    return None
+
+
+@celery_app.task(name=HARVEST_MAINTAIN_TASK, **_MAINTENANCE_LIMITS)
+def harvest_maintain(*args, **kwargs):
+    if _no_arguments(HARVEST_MAINTAIN_TASK, args, kwargs):
+        ctx = runtime.context(settings, celery_app)
+        result = harvest_maintenance.maintain(ctx.session_factory, runtime.publisher(settings, celery_app), settings)
+        log.info(
+            "harvest_maintenance scheduled=%d published=%d released=%d recovered=%d failed=%d cleaned=%d skipped=%s",
+            result.scheduled, result.published, result.released, result.recovered, result.failed, result.cleaned,
+            result.skipped,
+        )  # fmt: skip

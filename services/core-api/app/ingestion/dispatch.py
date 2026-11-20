@@ -58,7 +58,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..celery_app import INDEX_TASK, PARSE_TASK, broker_transport_options
+from ..celery_app import HARVEST_TASK, INDEX_TASK, PARSE_TASK, broker_transport_options
 from ..config import Settings
 
 log = logging.getLogger(__name__)
@@ -130,11 +130,11 @@ class CeleryPublisher:
                     log.debug("closing a broker connection failed", exc_info=True)
         raise PublishError(f"broker operation failed: {type(last).__name__ if last else 'deadline'}") from last
 
-    def _publish(self, task: str, queue: str, job_id: uuid.UUID) -> None:
+    def _publish(self, task: str, queue: str, job_id: uuid.UUID, key: str = "job_id") -> None:
         def send(connection) -> None:
             channel = connection.default_channel  # connects: one attempt, bounded by the timeouts
             producer = connection.Producer(channel=channel)
-            self._app.send_task(task, kwargs={"job_id": str(job_id)}, queue=queue, producer=producer, retry=False)
+            self._app.send_task(task, kwargs={key: str(job_id)}, queue=queue, producer=producer, retry=False)
 
         self._with_connection(send)
 
@@ -155,6 +155,12 @@ class CeleryPublisher:
 
     def index_queue_depth(self) -> int:
         return self._depth(self._settings.index_queue)
+
+    def publish_harvest(self, run_id: uuid.UUID) -> None:
+        self._publish(HARVEST_TASK, self._settings.harvest_queue, run_id, key="run_id")
+
+    def harvest_queue_depth(self) -> int:
+        return self._depth(self._settings.harvest_queue)
 
 
 # --- reservations -----------------------------------------------------------------------------

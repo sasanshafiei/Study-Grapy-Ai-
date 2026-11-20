@@ -34,6 +34,16 @@ Concurrency model (PostgreSQL, READ COMMITTED):
   detection would abort one of the two transactions.
   Recovery and dispatch take job rows with SKIP LOCKED and never wait for a
   row another session holds.
+- M6 (external harvesting). Index completion first takes, when they exist,
+  the course's harvest_course_settings row, then (external documents) the
+  source and the external resource, and only then the job and the
+  document(s): the global order harvest_course_settings -> sources ->
+  harvest_targets -> harvest_runs -> external_resources -> ingestion_jobs ->
+  documents shared with harvest persistence, scheduling, opt-out and source
+  disable. A replacement version switches the previous indexed version to
+  stale *before* marking itself indexed (partial unique index: one indexed
+  version per resource). A confirmed class indexing bumps the course's
+  dirty_generation; external indexing never does (no recursive harvesting).
 - No transaction or row lock is held while a PDF is being parsed: claiming
   commits at once; completion and failure are short transactions.
 - All times come from the database clock (now()).
@@ -79,6 +89,8 @@ PUBLIC_MESSAGES = {
     "index_invalid_content": "This document could not be prepared for search. An administrator can retry it.",
     "index_content_changed": "This document changed while it was being prepared for search. An administrator can retry it.",
     "index_retries_exhausted": "Preparing this document for search failed repeatedly because of a temporary server problem.",
+    # M6 (harvested external documents).
+    "external_inactive": "This external material was not prepared for search because its source or the course's external materials were switched off. An administrator can retry it.",
 }
 
 _EXHAUSTED_CODE = {"parse": "retries_exhausted", "index": "index_retries_exhausted"}
@@ -124,6 +136,8 @@ class CompletionStatus(enum.Enum):
     DOCUMENT_NOT_PENDING = "document_not_pending"  # job failed, document untouched
     INDEX_CONFLICT = "index_conflict"  # an index job was already active; nothing written
     CONTENT_CHANGED = "content_changed"  # index only: job and document failed, document not indexed
+    SUPERSEDED = "superseded"  # external: a newer version exists; job failed, version stale (never indexed)
+    EXTERNAL_INACTIVE = "external_inactive"  # external: source disabled or course opted out; job and document failed
 
 
 class FailureStatus(enum.Enum):
@@ -541,6 +555,28 @@ def complete_index(session_factory: sessionmaker[Session], claim: Claim, sent_di
     session = session_factory()
     try:
         try:
+            # Routing facts that never change after insert, read without a lock,
+            # then the M6 locks in the global order (module docstring).
+            facts = session.execute(
+                text("SELECT course_id, origin, source_id, external_resource_id FROM documents WHERE id = :id"),
+                {"id": claim.document_id},
+            ).one_or_none()
+            gate = None
+            if facts is not None and facts.course_id is not None:
+                gate = session.execute(
+                    text("SELECT enabled FROM harvest_course_settings WHERE course_id = :c FOR NO KEY UPDATE"),
+                    {"c": facts.course_id},
+                ).one_or_none()
+            external = facts is not None and facts.external_resource_id is not None
+            source_enabled = resource = None
+            if external:
+                source_enabled = session.execute(
+                    text("SELECT enabled FROM sources WHERE id = :s FOR SHARE"), {"s": facts.source_id}
+                ).scalar_one_or_none()
+                resource = session.execute(
+                    text("SELECT state, current_document_id FROM external_resources WHERE id = :r FOR NO KEY UPDATE"),
+                    {"r": facts.external_resource_id},
+                ).one_or_none()
             owned = _lock_owned(session, claim)
             if owned is None:
                 session.rollback()
@@ -552,6 +588,17 @@ def complete_index(session_factory: sessionmaker[Session], claim: Claim, sent_di
                 _finish_failed(session, claim.job_id, f"document_not_pending: document status is {document_status}")
                 session.commit()
                 return CompletionStatus.DOCUMENT_NOT_PENDING
+            if external:
+                if gate is None or gate.enabled is not True or source_enabled is not True:
+                    _finish_failed(session, claim.job_id, "external_inactive: source disabled or course opted out")
+                    _fail_document(session, owned.document_id, PUBLIC_MESSAGES["external_inactive"])
+                    session.commit()
+                    return CompletionStatus.EXTERNAL_INACTIVE
+                if resource is None or resource.state != "accepted" or resource.current_document_id != owned.document_id:
+                    _finish_failed(session, claim.job_id, "index_superseded: a newer version or a missing page replaced it")
+                    _mark_stale(session, owned.document_id, "superseded")
+                    session.commit()
+                    return CompletionStatus.SUPERSEDED
             try:
                 current = request_for(session, owned.document_id, lock_sections=True).content_digest
             except InvalidIndexContent as exc:
@@ -563,6 +610,16 @@ def complete_index(session_factory: sessionmaker[Session], claim: Claim, sent_di
                 _fail_document(session, owned.document_id, PUBLIC_MESSAGES["index_content_changed"])
                 session.commit()
                 return CompletionStatus.CONTENT_CHANGED
+            if external:
+                previous = session.execute(
+                    text(
+                        "SELECT id FROM documents WHERE external_resource_id = :r AND status = 'indexed' "
+                        "AND id <> :id FOR UPDATE"
+                    ),
+                    {"r": facts.external_resource_id, "id": owned.document_id},
+                ).scalar_one_or_none()
+                if previous is not None:  # old -> stale first: one indexed version per resource
+                    _mark_stale(session, previous, "superseded")
             session.execute(
                 text(
                     "UPDATE ingestion_jobs SET status = 'succeeded', finished_at = now(), lease_expires_at = NULL, "
@@ -574,6 +631,15 @@ def complete_index(session_factory: sessionmaker[Session], claim: Claim, sent_di
                 text("UPDATE documents SET status = 'indexed', error_message = NULL WHERE id = :id"),
                 {"id": owned.document_id},
             )
+            if gate is not None and not external and facts.origin == "class":
+                # New class material: the course's harvest is dirty (never for external indexing).
+                session.execute(
+                    text(
+                        "UPDATE harvest_course_settings SET dirty_generation = dirty_generation + 1, updated_at = now() "
+                        "WHERE course_id = :c"
+                    ),
+                    {"c": facts.course_id},
+                )
         except BaseException:
             _rollback_quietly(session)
             raise
@@ -589,6 +655,18 @@ def complete_index(session_factory: sessionmaker[Session], claim: Claim, sent_di
         session.close()
 
 
+def _mark_stale(session: Session, document_id: uuid.UUID, reason: str) -> None:
+    """External versions only (caller holds the resource and document locks): stale, with the reason."""
+    session.execute(text("UPDATE documents SET status = 'stale' WHERE id = :id"), {"id": document_id})
+    session.execute(
+        text(
+            "UPDATE external_document_versions SET stale_reason = :reason, staled_at = now() "
+            "WHERE document_id = :id AND stale_reason IS NULL"
+        ),
+        {"id": document_id, "reason": reason},
+    )
+
+
 def retry_index(session_factory: sessionmaker[Session], document_id: uuid.UUID) -> uuid.UUID:
     """Queue a new index job for a document whose indexing failed; returns the new job's id.
 
@@ -602,6 +680,17 @@ def retry_index(session_factory: sessionmaker[Session], document_id: uuid.UUID) 
     serialize on the job and document row locks; the loser is refused.
     """
     with session_factory() as session:
+        resource_id = session.execute(
+            text("SELECT external_resource_id FROM documents WHERE id = :id"), {"id": document_id}
+        ).scalar_one_or_none()
+        resource = None
+        if resource_id is not None:
+            # M6: a harvested version has no file and no parse job. The resource is
+            # locked first (global order), and only its current version may be retried.
+            resource = session.execute(
+                text("SELECT state, current_document_id FROM external_resources WHERE id = :r FOR NO KEY UPDATE"),
+                {"r": resource_id},
+            ).one()
         jobs = session.execute(
             # Lock order: parse job rows, then index job rows, then the document
             # (as parse completion: parse job, document, index job; index
@@ -627,7 +716,10 @@ def retry_index(session_factory: sessionmaker[Session], document_id: uuid.UUID) 
         } | {(row.kind, row.status) for row in jobs}
         if any(status in ("queued", "running") for _, status in rows):
             raise RetryRefused("a job of this document is already queued or running")
-        if ("parse", "succeeded") not in rows:
+        if resource is not None:
+            if resource.state != "accepted" or resource.current_document_id != document_id:
+                raise RetryRefused("a newer version of this external resource exists (or its page is missing)")
+        elif ("parse", "succeeded") not in rows:
             raise RetryRefused("the document was never parsed; use retry-parse")
         if ("index", "succeeded") in rows:
             raise RetryRefused("the document was already indexed; reindexing is not supported")
@@ -637,16 +729,17 @@ def retry_index(session_factory: sessionmaker[Session], document_id: uuid.UUID) 
         if sections == 0:
             raise RetryRefused("the document has no stored sections")
         try:
-            job_id = session.execute(
-                text("INSERT INTO ingestion_jobs (document_id, kind) VALUES (:id, 'index') RETURNING id"),
-                {"id": document_id},
-            ).scalar_one()
+            with session.begin_nested():
+                job_id = session.execute(
+                    text("INSERT INTO ingestion_jobs (document_id, kind) VALUES (:id, 'index') RETURNING id"),
+                    {"id": document_id},
+                ).scalar_one()
+                session.execute(
+                    text("UPDATE documents SET status = 'pending', error_message = NULL WHERE id = :id"),
+                    {"id": document_id},
+                )
         except IntegrityError:
-            raise RetryRefused("an index job is already queued or running") from None
-        session.execute(
-            text("UPDATE documents SET status = 'pending', error_message = NULL WHERE id = :id"),
-            {"id": document_id},
-        )
+            raise RetryRefused("an index job (or another pending version) is already queued or running") from None
         session.commit()
     log.warning("index_retry_queued document_id=%s job_id=%s", document_id, job_id)
     return job_id

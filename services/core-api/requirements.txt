@@ -17,6 +17,9 @@ amqp==5.3.1
 vine==5.1.0
 redis==5.2.0
 httpx==0.28.1
+# Pinned directly: the harvest transport (app/harvest/transport.py) parses provider responses with h11 for strict
+# chunked/Content-Length framing. Already in the resolved set as httpcore's dependency; 0.16.0 is the release httpx 0.28.1 resolves.
+h11==0.16.0
 # Pinned directly: core-api imports anyio (cancel scopes, fail_after, task groups) in the chat path.
 # 4.16.0 is the release already resolved with Starlette 1.3.1 and httpx 0.28.1 in the test image.
 anyio==4.16.0
