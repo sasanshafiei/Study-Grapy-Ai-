@@ -62,7 +62,7 @@ from ..indexing.client import AiIndexClient, InvalidServiceUrl, parse_service_ur
 from .dispatch import CeleryPublisher
 from .pipeline import WorkerContext
 
-REQUIRED_SCHEMA_REVISION = "0003"
+REQUIRED_SCHEMA_REVISION = "0004"
 REQUIRE_COMMENT_ENV = "DATABASE_REQUIRE_COMMENT"
 WORKER_ENVIRONMENT = ("DATABASE_URL", "REDIS_URL", "UPLOAD_DIR")
 BEAT_ENVIRONMENT = ("REDIS_URL",)
