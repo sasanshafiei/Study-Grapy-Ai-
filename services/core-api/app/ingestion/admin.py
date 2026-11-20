@@ -137,8 +137,9 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] = os.environ)
     sub = parser.add_subparsers(dest="command", required=True)
     pre = sub.add_parser("preflight", help="run the worker start-up checks (changes nothing)")
     pre.add_argument(
-        "--role", choices=(runtime.ROLE_PROCESSING, runtime.ROLE_INDEX), default=runtime.ROLE_PROCESSING,
-        help="processing (parse/maintenance worker, default) or index (index worker)",
+        "--role", choices=(runtime.ROLE_PROCESSING, runtime.ROLE_INDEX, runtime.ROLE_HARVEST),
+        default=runtime.ROLE_PROCESSING,
+        help="processing (parse/maintenance worker, default), index (index worker) or harvest (harvest worker)",
     )
     init = sub.add_parser("init-storage", help="bind the database to the upload store (explicit, once)")
     init.add_argument("--database", required=True, help="the database name DATABASE_URL must point to")

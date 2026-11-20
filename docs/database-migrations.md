@@ -137,6 +137,45 @@ first. Without codes the downgrade restores the 0003 schema exactly.
 
 **Order.** Migrate before starting workers: they now require revision `0004`.
 
+## Revision 0005: external harvesting (M6)
+
+Adds provider columns to `sources` (`provider`, `language`, `licence_url`; NULL for
+every existing row, CHECK `sources_provider_check` admits only `wikipedia`, unique per
+provider+language among provider rows), `documents.external_resource_id` (NULL for every
+existing row; CHECK `documents_external_resource_check`; partial unique indexes
+`documents_external_resource_indexed_idx` / `…_pending_idx`), widens
+`document_sections_locator_check` to also accept section locators, and creates
+`harvest_course_settings`, `harvest_targets`, `harvest_queries`,
+`harvest_provider_budgets`, `harvest_runs`, `external_resources` and
+`external_document_versions` ([external-harvesting.md](external-harvesting.md)). Nothing
+is seeded. Every new unique constraint covers only new tables or columns that are NULL
+in every existing row, so no legacy row can violate it; the preflight (`DO
+$migration_0005_preflight$`, after locking `sources`, `documents`,
+`document_sections`) additionally verifies that every existing section satisfies the
+page-locator rule before the CHECK is replaced. Existing values are never modified.
+
+**Referential integrity between the two mutually dependent tables.** `documents` and
+`external_resources` reference each other, so the keys are created in dependency order and
+dropped in reverse. Upgrade: `external_resources` (with the unique key
+`external_resources_id_course_id_source_id_key`) → `documents.external_resource_id` with the
+unique key `documents_id_external_resource_id_key` and the composite key
+`documents_external_resource_id_fkey` `(external_resource_id, course_id, source_id) →
+external_resources (id, course_id, source_id)` (a harvested document can only reference a
+resource of its own course and source) → last, once both tables exist,
+`external_resources_current_document_id_fkey` `(current_document_id, id) → documents (id,
+external_resource_id)` (the current version must exist and belong to the same resource).
+Both are `MATCH SIMPLE`, `NO ACTION`: a NULL `current_document_id` (no version yet) or a
+class document (no resource) is not checked. The model declares the second key with
+`use_alter=True`. Downgrade drops `external_resources_current_document_id_fkey` first. Revision
+0005 is not deployed; it was edited in place and no new revision was introduced.
+
+**Downgrade guard.** `alembic downgrade 0004` (or lower) is refused, before any change,
+while any harvesting row, provider-managed source, document linked to a resource or
+section with a section locator exists. Without M6 state the downgrade restores 0004
+exactly (tested against a snapshot).
+
+**Order.** Migrate before starting workers: they now require revision `0005`.
+
 ## Safety guard: which database a migration may touch
 
 `app/migration_safety.py` holds the checks; `migrations/env.py` applies them.

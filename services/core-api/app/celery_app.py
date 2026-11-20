@@ -29,7 +29,11 @@ INDEX_TASK = "ingestion.index_document"
 DISPATCH_TASK = "ingestion.dispatch_parse_jobs"
 RECOVER_TASK = "ingestion.recover_stale_parse_jobs"
 RECONCILE_TASK = "ingestion.reconcile_files"
-MAINTENANCE_TASKS = (DISPATCH_TASK, RECOVER_TASK, RECONCILE_TASK)
+# M6: one bounded slice of a harvest run (harvest queue, dedicated harvest worker),
+# and the harvest maintenance tick (schedule, dispatch, recover, clean up).
+HARVEST_TASK = "harvest.run_slice"
+HARVEST_MAINTAIN_TASK = "harvest.maintain"
+MAINTENANCE_TASKS = (DISPATCH_TASK, RECOVER_TASK, RECONCILE_TASK, HARVEST_MAINTAIN_TASK)
 
 
 def broker_transport_options(settings: Settings) -> dict:
@@ -52,6 +56,7 @@ def beat_schedule(settings: Settings) -> dict:
         "dispatch-parse-jobs": entry(DISPATCH_TASK, settings.dispatch_interval_seconds),
         "recover-stale-parse-jobs": entry(RECOVER_TASK, settings.recovery_interval_seconds),
         "reconcile-files": entry(RECONCILE_TASK, settings.reconcile_interval_seconds),
+        "harvest-maintenance": entry(HARVEST_MAINTAIN_TASK, settings.harvest_maintenance_interval_seconds),
     }
 
 
@@ -83,6 +88,7 @@ def make_celery(settings: Settings) -> Celery:
         task_routes={
             PARSE_TASK: {"queue": settings.parse_queue},
             INDEX_TASK: {"queue": settings.index_queue},
+            HARVEST_TASK: {"queue": settings.harvest_queue},
             **{name: {"queue": settings.maintenance_queue} for name in MAINTENANCE_TASKS},
         },
         timezone="UTC",

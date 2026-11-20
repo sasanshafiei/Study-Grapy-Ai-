@@ -69,6 +69,56 @@ ready*: **no job is claimed and no attempt is consumed**. CE caches each probe r
 (ready or not) for `AI_PROBE_CACHE_SECONDS` (30 s) per worker process, so an unavailable
 service is asked at most once per period per process.
 
+## 3a. Locator schemes (M6)
+
+Backward-compatible extension, still `studygraph.index/1`. The capabilities object may
+carry one optional key:
+
+```json
+{"protocol": "studygraph.index/1", "service": "ai-service", "mock": false,
+ "completion": ["sync"], "max_request_bytes": 16777216, "locators": ["page", "section"]}
+```
+
+- Absent `locators` (every M4 service) means `["page"]`. If present it must be a list of
+  distinct strings from `page`, `section` and must contain `page`; anything else makes
+  the service not ready. Every other extra key is still refused.
+- CE sends a **section-based** document only to a service that advertised `"section"`.
+  Otherwise the external index job is deferred before it is claimed
+  (`EXTERNAL_INDEX_DEFER_SECONDS`): no attempt is consumed, and since dispatch orders by
+  `available_at`, deferred jobs never hold back page-based (PDF) jobs. CE re-checks the
+  built request's scheme against the same capabilities after claiming and never sends a
+  section document to a service that did not advertise it.
+- Page-based documents (every class upload) are unchanged: same keys, same canonical
+  bytes, same `content_digest` and `Idempotency-Key` as in M4.
+
+A section-based request differs only in the document object and the section locators:
+
+```json
+{"protocol": "studygraph.index/1",
+ "document": {"id": "…", "course_id": "…", "origin": "external", "kind": "article",
+   "title": "Chemical equilibrium", "url": "https://en.wikipedia.org/wiki/Chemical_equilibrium",
+   "licence": "CC BY-SA 4.0", "language": "en", "source_sha256": "<normalized content sha256>",
+   "page_count": null, "locator_scheme": "section",
+   "attribution": {"provider": "wikipedia", "page_id": 5821, "revision_id": 1234567,
+     "revision_url": "https://en.wikipedia.org/w/index.php?oldid=1234567",
+     "canonical_url": "https://en.wikipedia.org/wiki/Chemical_equilibrium",
+     "licence_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+     "attribution": "\"Chemical equilibrium\", Wikipedia (en), by Wikipedia contributors …"}},
+ "sections": [
+   {"ordinal": 0, "locator": {"anchor": null, "heading": null, "level": 0}, "text": "…"},
+   {"ordinal": 1, "locator": {"anchor": "History", "heading": "History", "level": 2}, "text": "…"}],
+ "content_digest": "…", "idempotency_key": "…"}
+```
+
+Locators: level 0 is the lead (anchor and heading `null`), levels 2..6 carry the
+provider's section anchor and heading. There are no page numbers. The response is the
+§4 response, unchanged. **AI-side obligations before advertising `"section"`:** persist
+chunk locators that M5 can display (`{"section": "<heading, ≤ 40 characters>"}` or an
+agreed mapping), keep `attribution` with the document and surface it with any excerpt,
+and filter retrieval by course id, origin, document status `indexed` and enabled source
+(docs/external-harvesting.md §8). Each new harvested *version* is a new document id with
+its own key; the AI side never receives a changed body for an existing document id.
+
 ## 4. `POST /ai/v1/index/documents`
 
 Headers: `Content-Type: application/json`, `Idempotency-Key: <64 hex>`, the bearer

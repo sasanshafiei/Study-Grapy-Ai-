@@ -40,13 +40,14 @@ import uuid
 from dataclasses import dataclass
 from typing import BinaryIO
 
-from sqlalchemy import exists, func, insert, select, text
+from sqlalchemy import and_, exists, func, insert, or_, select, text
+from sqlalchemy.orm import aliased
 from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..auth import CurrentUser
 from ..errors import ApiError
-from ..models import Document, IngestionJob, User
+from ..models import Document, ExternalResource, IngestionJob, Source, User
 from ..schemas.documents import (
     DocumentItem,
     DocumentUploadResponse,
@@ -122,6 +123,38 @@ def read_failed(exc: SQLAlchemyError) -> ApiError:
 # --- listing ---------------------------------------------------------------------------
 
 
+# M6: display names of provider-managed sources (legacy sources keep source_name = None).
+SOURCE_DISPLAY_NAMES = {"wikipedia": "Wikipedia"}
+
+
+def _harvested_visible():
+    """Visibility of a harvested version (documents.external_resource_id set).
+
+    Shown only while its source is enabled and it is not stale; an indexed
+    version is shown; a not-yet-indexed (pending or failed) version is shown
+    only if it is the resource's current version and no version of the
+    resource is indexed (so a replacement stays hidden, and the previous
+    indexed version visible, until the replacement is indexed). Status comes
+    from the version's own index job lifecycle (queued / processing / ready /
+    failed), exactly as for class documents.
+    """
+    sibling = aliased(Document)
+    indexed_sibling = exists().where(
+        sibling.external_resource_id == Document.external_resource_id, sibling.status == "indexed"
+    )
+    current = exists().where(
+        ExternalResource.id == Document.external_resource_id, ExternalResource.current_document_id == Document.id
+    )
+    return or_(
+        Document.external_resource_id.is_(None),
+        and_(
+            Source.enabled.is_(True),
+            Document.status != "stale",
+            or_(Document.status == "indexed", and_(current, ~indexed_sibling)),
+        ),
+    )
+
+
 def list_documents(session_factory: sessionmaker[Session], user: CurrentUser, course_id: uuid.UUID) -> list[DocumentItem]:
     job_running = exists().where(IngestionJob.document_id == Document.id, IngestionJob.status == "running")
     # Parsing finished; indexing (M4) has not: still processing, never ready.
@@ -143,9 +176,12 @@ def list_documents(session_factory: sessionmaker[Session], user: CurrentUser, co
             User.display_name,
             job_running.label("job_running"),
             parsed.label("parsed"),
+            Document.external_resource_id,
+            Source.provider,
         )
         .outerjoin(User, User.id == Document.uploaded_by)
-        .where(Document.course_id == course_id)
+        .outerjoin(Source, Source.id == Document.source_id)
+        .where(Document.course_id == course_id, _harvested_visible())
         .order_by(Document.created_at.desc(), Document.id.desc())
     )
     try:
@@ -163,7 +199,7 @@ def list_documents(session_factory: sessionmaker[Session], user: CurrentUser, co
             kind=public_kind(row.kind, row.origin),
             status=public_status(row.status, job_running=row.job_running, parsed=row.parsed),
             pages=row.page_count,
-            source_name=None,  # filled from sources once harvesting exists
+            source_name=SOURCE_DISPLAY_NAMES.get(row.provider) if row.external_resource_id is not None else None,
             url=row.url,
             licence=row.licence,
             added_by=row.display_name,

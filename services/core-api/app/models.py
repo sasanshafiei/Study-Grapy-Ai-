@@ -24,6 +24,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     SmallInteger,
@@ -115,6 +116,20 @@ class Source(Base):
     licence: Mapped[str] = mapped_column(String(100), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # --- added by revision 0005 (M6 harvesting; NULL for every legacy source) ---
+    # A provider-managed source: created disabled by the operator CLI, never seeded.
+    provider: Mapped[str | None] = mapped_column(String(30), nullable=True)  # wikipedia
+    language: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    licence_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "provider IS NULL OR (provider = 'wikipedia' AND language IS NOT NULL AND language ~ '^[a-z]{2,3}$'"
+            " AND licence_url IS NOT NULL)",
+            name="provider",
+        ),
+        Index(None, "provider", "language", unique=True, postgresql_where=text("provider IS NOT NULL")),
+    )
 
 
 DOCUMENT_ORIGINS = ("class", "external", "web_cache")
@@ -161,6 +176,35 @@ class Document(Base):
             unique=True,
             postgresql_where=text("origin = 'class' AND storage_key IS NOT NULL"),
         ),
+        # M6: a harvested version is a fileless external document of a course and a source.
+        CheckConstraint(
+            "external_resource_id IS NULL OR (origin = 'external' AND course_id IS NOT NULL"
+            " AND source_id IS NOT NULL AND storage_key IS NULL)",
+            name="external_resource",
+        ),
+        # M6: a harvested document can only reference an external resource of its own course and source
+        # (MATCH SIMPLE: class documents have no resource and are not checked).
+        ForeignKeyConstraint(
+            ["external_resource_id", "course_id", "source_id"],
+            ["external_resources.id", "external_resources.course_id", "external_resources.source_id"],
+            name="documents_external_resource_id_fkey",
+        ),
+        # Target of external_resources.current_document_id: that document must belong to the same resource.
+        UniqueConstraint("id", "external_resource_id", name="documents_id_external_resource_id_key"),
+        # At most one indexed and one pending version per external resource. A
+        # replacement switches old indexed -> stale first, then new -> indexed.
+        Index(
+            "documents_external_resource_indexed_idx",
+            "external_resource_id",
+            unique=True,
+            postgresql_where=text("status = 'indexed' AND external_resource_id IS NOT NULL"),
+        ),
+        Index(
+            "documents_external_resource_pending_idx",
+            "external_resource_id",
+            unique=True,
+            postgresql_where=text("status = 'pending' AND external_resource_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = pk()
@@ -185,6 +229,9 @@ class Document(Base):
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     kind: Mapped[str | None] = mapped_column(String(20), nullable=True)  # slides | notes | syllabus | textbook | article
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)  # user-readable, shown by the web app
+    # --- added by revision 0005 (M6): the resource this harvested version belongs to ---
+    # The key is composite (see __table_args__): the resource must belong to this document's course and source.
+    external_resource_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
 
 
 JOB_KINDS = ("parse", "index")
@@ -262,6 +309,32 @@ class IngestionJob(Base):
     last_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+# Exactly {"page": <integer 1 .. 2^31-1>} (PDF pages, M3), or since revision 0005
+# exactly {"anchor", "heading", "level"} (M6 section locators): level 0 is the
+# lead section (anchor and heading null); levels 2..6 carry the provider's
+# section anchor and heading text. The CASE makes every branch TRUE or FALSE.
+SECTION_LOCATOR_CHECK = (
+    "CASE WHEN jsonb_typeof(locator) = 'object' AND jsonb_typeof(locator -> 'page') = 'number'"
+    " AND (locator - 'page') = '{}'::jsonb"
+    " THEN (locator ->> 'page')::numeric BETWEEN 1 AND 2147483647"
+    " AND (locator ->> 'page')::numeric = trunc((locator ->> 'page')::numeric)"
+    " WHEN jsonb_typeof(locator) = 'object' AND (locator - 'anchor' - 'heading' - 'level') = '{}'::jsonb"
+    " AND (locator -> 'anchor') IS NOT NULL AND (locator -> 'heading') IS NOT NULL"
+    " AND jsonb_typeof(locator -> 'level') = 'number'"
+    " THEN CASE WHEN (locator ->> 'level')::numeric = 0"
+    " THEN jsonb_typeof(locator -> 'anchor') = 'null' AND jsonb_typeof(locator -> 'heading') = 'null'"
+    " WHEN (locator ->> 'level')::numeric IN (2, 3, 4, 5, 6)"
+    " THEN jsonb_typeof(locator -> 'anchor') = 'string' AND jsonb_typeof(locator -> 'heading') = 'string'"
+    " AND char_length(locator ->> 'anchor') BETWEEN 1 AND 255"
+    " AND char_length(locator ->> 'heading') BETWEEN 1 AND 255"
+    " AND (locator ->> 'anchor') !~ '[[:cntrl:][:space:]]'"
+    " AND (locator ->> 'heading') !~ '[[:cntrl:]]'"
+    " AND (locator ->> 'heading') = btrim(locator ->> 'heading')"
+    " ELSE false END"
+    " ELSE false END"
+)
+
+
 class DocumentSection(Base):
     """Normalized text of one source page of a parsed document (M3, CE-1).
 
@@ -279,14 +352,7 @@ class DocumentSection(Base):
         CheckConstraint("btrim(text, E' \\t\\n\\r') <> ''", name="text"),
         # Exactly {"page": <integer 1 .. 2^31-1>}. The CASE keeps the cast from
         # running on non-numbers and makes a missing key FALSE, never NULL.
-        CheckConstraint(
-            "CASE WHEN jsonb_typeof(locator) = 'object' AND jsonb_typeof(locator -> 'page') = 'number'"
-            " AND (locator - 'page') = '{}'::jsonb"
-            " THEN (locator ->> 'page')::numeric BETWEEN 1 AND 2147483647"
-            " AND (locator ->> 'page')::numeric = trunc((locator ->> 'page')::numeric)"
-            " ELSE false END",
-            name="locator",
-        ),
+        CheckConstraint(SECTION_LOCATOR_CHECK, name="locator"),
         UniqueConstraint("document_id", "ordinal"),
     )
 
@@ -315,6 +381,266 @@ class StorageIdentity(Base):
 
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, server_default=text("1"))
     storage_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+# --- External harvesting (M6, revision 0005, docs/external-harvesting.md) ---------
+#
+# Lock order, used by every transaction that takes more than one of these rows
+# (harvest persistence, index completion, scheduling, opt-out, source disable):
+#   harvest_course_settings -> sources -> harvest_targets -> harvest_runs
+#   -> external_resources -> ingestion_jobs -> documents (new version, then old)
+
+
+class HarvestCourseSettings(Base):
+    """Explicit course opt-in (enabled is false until an operator turns it on), quota, dirty generation."""
+
+    __tablename__ = "harvest_course_settings"
+    __table_args__ = (
+        CheckConstraint("max_active_documents BETWEEN 1 AND 500", name="quota"),
+        CheckConstraint("dirty_generation >= 0", name="generation"),
+    )
+
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), primary_key=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    max_active_documents: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("20"))
+    # Bumped by every confirmed class indexing of the course (never by external indexing).
+    dirty_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class HarvestTarget(Base):
+    """A course x provider source selected for harvesting, with its schedule."""
+
+    __tablename__ = "harvest_targets"
+    __table_args__ = (
+        CheckConstraint("harvested_generation >= 0", name="generation"),
+        CheckConstraint("refresh_interval_seconds BETWEEN 3600 AND 31536000", name="refresh"),
+        Index(None, "source_id"),
+    )
+
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("harvest_course_settings.course_id", ondelete="CASCADE"), primary_key=True
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), primary_key=True)
+    harvested_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    refresh_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("604800"))
+    next_refresh_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # No run is scheduled before this (backoff after a failed run).
+    not_before: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class HarvestQuery(Base):
+    """A public query an operator approved for a course topic, bound to its exact text."""
+
+    __tablename__ = "harvest_queries"
+    __table_args__ = (
+        CheckConstraint(
+            "query_text = btrim(query_text) AND char_length(query_text) BETWEEN 2 AND 120"
+            " AND query_text !~ '[[:cntrl:]]'",
+            name="text",
+        ),
+        CheckConstraint(
+            "(status = 'approved' AND revoked_at IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL)",
+            name="status",
+        ),
+        Index(None, "course_id", "topic_id", unique=True, postgresql_where=text("status = 'approved'")),
+        Index(None, "topic_id"),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("harvest_course_settings.course_id", ondelete="CASCADE"), nullable=False
+    )
+    topic_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("topics.id", ondelete="CASCADE"), nullable=False)
+    query_text: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'approved'::character varying")
+    )
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class HarvestProviderBudget(Base):
+    """Request budget of one source: a fixed window, a minimum spacing and a Retry-After block."""
+
+    __tablename__ = "harvest_provider_budgets"
+    __table_args__ = (
+        CheckConstraint(
+            "window_seconds BETWEEN 1 AND 86400 AND max_requests BETWEEN 1 AND 100000"
+            " AND min_interval_ms BETWEEN 0 AND 600000 AND used_requests BETWEEN 0 AND max_requests",
+            name="limits",
+        ),
+    )
+
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), primary_key=True)
+    window_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_requests: Mapped[int] = mapped_column(Integer, nullable=False)
+    min_interval_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    used_requests: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # No request to this provider before this time (spacing, Retry-After, maxlag).
+    blocked_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+HARVEST_RUN_STATUSES = ("queued", "running", "succeeded", "failed", "cancelled")
+
+
+class HarvestRun(Base):
+    """One durable harvest of a course x source (app/harvest/runs.py).
+
+    claim_count counts every claim (bounded slices of work, max_claims makes
+    the run finite); failure_count counts only failed attempts (errors, lost
+    leases). Neither is ever decremented. Progress is persisted in `progress`
+    under the attempt token, so a yield or a failure never repeats work.
+    """
+
+    __tablename__ = "harvest_runs"
+    __table_args__ = (
+        CheckConstraint("trigger IN ('dirty', 'refresh', 'manual')", name="trigger"),
+        CheckConstraint("status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')", name="status"),
+        CheckConstraint(
+            "generation >= 0 AND max_claims >= 1 AND claim_count BETWEEN 0 AND max_claims"
+            " AND max_failures >= 1 AND failure_count BETWEEN 0 AND max_failures",
+            name="counters",
+        ),
+        CheckConstraint(
+            "(status = 'queued' AND finished_at IS NULL AND attempt_token IS NULL AND lease_expires_at IS NULL)"
+            " OR (status = 'running' AND started_at IS NOT NULL AND finished_at IS NULL AND claim_count >= 1"
+            " AND attempt_token IS NOT NULL AND lease_expires_at IS NOT NULL AND lease_expires_at > started_at)"
+            " OR (status IN ('succeeded', 'failed', 'cancelled') AND finished_at IS NOT NULL"
+            " AND lease_expires_at IS NULL)",
+            name="lifecycle",
+        ),
+        CheckConstraint("jsonb_typeof(progress) = 'object'", name="progress"),
+        ForeignKeyConstraint(
+            ["course_id", "source_id"],
+            ["harvest_targets.course_id", "harvest_targets.source_id"],
+            ondelete="CASCADE",
+        ),
+        # One active run per target: the scheduler's race guard.
+        Index(None, "course_id", "source_id", unique=True, postgresql_where=text("status IN ('queued', 'running')")),
+        Index(None, "status", "available_at"),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    course_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    trigger: Mapped[str] = mapped_column(String(20), nullable=False)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'queued'::character varying"))
+    claim_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    max_claims: Mapped[int] = mapped_column(Integer, nullable=False)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    max_failures: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    progress: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ExternalResource(Base):
+    """Durable identity of one provider page within a course: revision tracking, dedup, missing evidence."""
+
+    __tablename__ = "external_resources"
+    __table_args__ = (
+        CheckConstraint("state IN ('accepted', 'duplicate', 'missing')", name="state"),
+        CheckConstraint("page_id > 0", name="page_id"),
+        CheckConstraint("content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'", name="content_sha256"),
+        CheckConstraint("missing_checks >= 0 AND ((missing_checks = 0) = (missing_since IS NULL))", name="missing"),
+        UniqueConstraint("course_id", "source_id", "page_id"),
+        UniqueConstraint("id", "course_id", "source_id", name="external_resources_id_course_id_source_id_key"),
+        ForeignKeyConstraint(
+            ["current_document_id", "id"],
+            ["documents.id", "documents.external_resource_id"],
+            name="external_resources_current_document_id_fkey",
+            use_alter=True,
+        ),
+        # Concurrency-safe course-scoped deduplication of accepted content.
+        Index(None, "course_id", "content_sha256", unique=True, postgresql_where=text("state = 'accepted'")),
+        Index(None, "source_id", "next_check_at"),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"), nullable=False)
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sources.id"), nullable=False)
+    page_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    duplicate_of_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("external_resources.id", ondelete="SET NULL"), nullable=True
+    )
+    # The latest accepted version (pending, indexed or failed); the visible
+    # version is the one whose document is `indexed`. The composite key in
+    # __table_args__ (use_alter: the tables reference each other) makes the
+    # document exist and belong to this resource. Written only under this row's lock.
+    current_document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    last_revision_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    discovered_by_query_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("harvest_queries.id", ondelete="SET NULL"), nullable=True
+    )
+    missing_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    missing_checks: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    missing_evidence: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_check_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ExternalDocumentVersion(Base):
+    """Provenance of one harvested document version; immutable except for its stale marking."""
+
+    __tablename__ = "external_document_versions"
+    __table_args__ = (
+        CheckConstraint("version >= 1 AND page_id > 0 AND revision_id > 0", name="identity"),
+        CheckConstraint("content_sha256 ~ '^[0-9a-f]{64}$'", name="content_sha256"),
+        CheckConstraint(
+            "(stale_reason IS NULL AND staled_at IS NULL AND stale_evidence IS NULL)"
+            " OR (stale_reason = 'superseded' AND staled_at IS NOT NULL)"
+            " OR (stale_reason = 'missing' AND staled_at IS NOT NULL AND stale_evidence IS NOT NULL)",
+            name="stale",
+        ),
+        UniqueConstraint("resource_id", "version"),
+        Index(None, "harvest_run_id"),
+    )
+
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
+    resource_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("external_resources.id", ondelete="CASCADE"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    revision_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    revision_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False)
+    revision_url: Mapped[str] = mapped_column(Text, nullable=False)
+    licence: Mapped[str] = mapped_column(String(100), nullable=False)
+    licence_url: Mapped[str] = mapped_column(Text, nullable=False)
+    attribution: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    language: Mapped[str] = mapped_column(String(10), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    harvest_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("harvest_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    stale_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)  # superseded | missing
+    stale_evidence: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    staled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

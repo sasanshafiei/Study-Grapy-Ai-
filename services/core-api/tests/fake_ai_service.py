@@ -21,7 +21,12 @@ client, state machine and workers:
 - "commits" count durable index operations, per course, for the duplicate,
   lost-response and course-isolation tests;
 - scripted faults: lose the response after committing, block until released,
-  answer with a given status/body, or delay.
+  answer with a given status/body, or delay;
+- M6 locator negotiation: `locators` (None = an M4 service that advertises
+  nothing, i.e. page only) is advertised in the capabilities when set; a
+  section-based request to a service that did not advertise "section" is
+  refused (422 locator_scheme_unsupported) and counted in
+  `unadvertised_section_requests`, so tests can prove core never sends one.
 
 It listens on 127.0.0.1 on an ephemeral port, in a daemon thread of the test
 process; real worker subprocesses started by the tests reach it there.
@@ -84,6 +89,8 @@ class FakeAiService:
     generations: dict[str, Commit] = field(default_factory=dict)  # by document id: at most one each
     requests: list[Recorded] = field(default_factory=list)
     faults: list[Fault] = field(default_factory=list)
+    locators: list[str] | None = None
+    unadvertised_section_requests: int = 0
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
@@ -189,6 +196,8 @@ class _Handler(BaseHTTPRequestHandler):
             "completion": ["sync"],
             "max_request_bytes": self.fake.max_request_bytes,
         }
+        if self.fake.capabilities is None and self.fake.locators is not None:
+            capabilities = {**capabilities, "locators": list(self.fake.locators)}
         self._send(200, capabilities)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -225,6 +234,10 @@ class _Handler(BaseHTTPRequestHandler):
             ).hexdigest()
         except (ValueError, KeyError, TypeError, AttributeError):
             self._error(400, "invalid_request", False)
+            return
+        if document.get("locator_scheme") == "section" and "section" not in (self.fake.locators or ["page"]):
+            self.fake.unadvertised_section_requests += 1
+            self._error(422, "locator_scheme_unsupported", False)
             return
         if (
             request.get("protocol") != PROTOCOL

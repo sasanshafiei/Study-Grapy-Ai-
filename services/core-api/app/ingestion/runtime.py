@@ -37,8 +37,11 @@ which Celery has selected before worker_init:
   Readiness is probed inside the index task, at claim time (cached per
   process), where the task's soft and hard limits apply. It never needs,
   reads or checks the upload store.
-A worker that consumes the index queue together with any other queue is
-refused: the roles need different credentials and mounts.
+- harvest (exactly the harvest queue, M6): DATABASE_URL and REDIS_URL, the
+  same database checks, and while HARVEST_ENABLED a valid HARVEST_USER_AGENT.
+  No upload store, no AI service, no provider request at start-up.
+A worker that consumes the index or the harvest queue together with any other
+queue is refused: the roles need different credentials, mounts and egress.
 """
 
 from __future__ import annotations
@@ -62,14 +65,16 @@ from ..indexing.client import AiIndexClient, InvalidServiceUrl, parse_service_ur
 from .dispatch import CeleryPublisher
 from .pipeline import WorkerContext
 
-REQUIRED_SCHEMA_REVISION = "0004"
+REQUIRED_SCHEMA_REVISION = "0005"
 REQUIRE_COMMENT_ENV = "DATABASE_REQUIRE_COMMENT"
 WORKER_ENVIRONMENT = ("DATABASE_URL", "REDIS_URL", "UPLOAD_DIR")
 BEAT_ENVIRONMENT = ("REDIS_URL",)
 INDEX_WORKER_ENVIRONMENT = ("DATABASE_URL", "REDIS_URL", "AI_SERVICE_URL")
+HARVEST_WORKER_ENVIRONMENT = ("DATABASE_URL", "REDIS_URL")
 MIN_TOKEN_LENGTH = 32
 ROLE_PROCESSING = "processing"
 ROLE_INDEX = "index"
+ROLE_HARVEST = "harvest"
 EX_CONFIG = 78
 
 log = logging.getLogger(__name__)
@@ -170,14 +175,16 @@ def worker_preflight(settings: Settings, environ: Mapping[str, str] = os.environ
 def worker_role(queues, settings: Settings) -> str:
     """The role of a worker consuming `queues` (names); refuses mixing the index queue with others."""
     names = set(queues or ())
-    if settings.index_queue not in names:
-        return ROLE_PROCESSING
-    if names != {settings.index_queue}:
-        raise PreflightError(
-            f"the index queue {settings.index_queue!r} must be consumed by a dedicated worker "
-            f"(this worker also consumes {', '.join(sorted(names - {settings.index_queue}))})"
-        )
-    return ROLE_INDEX
+    for queue, role in ((settings.index_queue, ROLE_INDEX), (settings.harvest_queue, ROLE_HARVEST)):
+        if queue not in names:
+            continue
+        if names != {queue}:
+            raise PreflightError(
+                f"the {role} queue {queue!r} must be consumed by a dedicated worker "
+                f"(this worker also consumes {', '.join(sorted(names - {queue}))})"
+            )
+        return role
+    return ROLE_PROCESSING
 
 
 def check_ai_settings(settings: Settings, environ: Mapping[str, str]) -> None:
@@ -209,9 +216,34 @@ def index_worker_preflight(settings: Settings, environ: Mapping[str, str] = os.e
     log.info("index worker preflight: AI service readiness is checked per claim, inside the index task")
 
 
+def harvest_worker_preflight(settings: Settings, environ: Mapping[str, str] = os.environ) -> None:
+    """Start-up checks of the harvest worker: database only; no provider request is made here."""
+    require_environment(environ, HARVEST_WORKER_ENVIRONMENT)
+    if settings.harvest_enabled:
+        from ..harvest.transport import validate_user_agent
+
+        agent = environ.get("HARVEST_USER_AGENT", "")
+        if not agent.strip():
+            raise PreflightError("HARVEST_USER_AGENT must be set explicitly while HARVEST_ENABLED is true")
+        try:
+            validate_user_agent(agent)
+        except ValueError as exc:
+            raise PreflightError(str(exc)) from None
+    target = database_target(environ)
+    check_database(target)
+    log.info(
+        "harvest worker preflight: database %s verified at revision %s",
+        describe_target(target.url), REQUIRED_SCHEMA_REVISION,
+    )  # fmt: skip
+    if not settings.harvest_enabled:
+        log.warning("harvest worker preflight: HARVEST_ENABLED is false; harvest runs will not be claimed")
+
+
 def preflight_for_role(role: str, settings: Settings, environ: Mapping[str, str] = os.environ) -> None:
     if role == ROLE_INDEX:
         index_worker_preflight(settings, environ)
+    elif role == ROLE_HARVEST:
+        harvest_worker_preflight(settings, environ)
     else:
         worker_preflight(settings, environ)
 
@@ -232,14 +264,16 @@ def exit_on_failure(check, *args) -> None:
 
 # --- per-process context ---------------------------------------------------------------------
 
-_state: dict = {"pid": None, "engine": None, "context": None, "publisher": None, "index_context": None}
+_state: dict = {
+    "pid": None, "engine": None, "context": None, "publisher": None, "index_context": None, "harvest_context": None,
+}  # fmt: skip
 
 
 def reset_after_fork() -> None:
     engine = _state.get("engine")
     if engine is not None:
         engine.dispose(close=False)  # never close connections that belong to the parent
-    _state.update(pid=None, engine=None, context=None, publisher=None, index_context=None)
+    _state.update(pid=None, engine=None, context=None, publisher=None, index_context=None, harvest_context=None)
 
 
 def _ensure_process_state(settings: Settings, celery_app, environ: Mapping[str, str]) -> None:
@@ -257,6 +291,7 @@ def _ensure_process_state(settings: Settings, celery_app, environ: Mapping[str, 
         ),
         publisher=CeleryPublisher(celery_app, settings),
         index_context=None,
+        harvest_context=None,
     )
 
 
@@ -279,6 +314,43 @@ def index_context(settings: Settings, celery_app, environ: Mapping[str, str] = o
             session_factory=_state["context"].session_factory, settings=settings, client=AiIndexClient(settings)
         )
     return _state["index_context"]
+
+
+def harvest_context(settings: Settings, celery_app, environ: Mapping[str, str] = os.environ):
+    """The harvest worker's per-process context: verified sessions and the Wikipedia connector factory.
+
+    The storage object of the shared context is never used by harvesting.
+    """
+    from ..harvest.executor import HarvestContext
+    from ..harvest.transport import ProviderTransport
+    from ..harvest.wikipedia import WikipediaConnector
+
+    _ensure_process_state(settings, celery_app, environ)
+    if _state["harvest_context"] is None:
+        transports: list[ProviderTransport] = []
+
+        def connector(language: str) -> WikipediaConnector:
+            # Built on first use (after the HARVEST_ENABLED and gate checks), with the
+            # validated User-Agent; never at worker start-up.
+            if not transports:
+                transports.append(ProviderTransport(settings.harvest_user_agent or ""))
+            return WikipediaConnector(transports[0], settings, language)
+
+        _state["harvest_context"] = HarvestContext(
+            session_factory=_state["context"].session_factory, settings=settings, connector_factory=connector
+        )
+    return _state["harvest_context"]
+
+
+def run_id_of(args: tuple, kwargs: dict) -> uuid.UUID | None:
+    """The run id of a harvest message, or None unless it is exactly {"run_id": "<canonical uuid>"}."""
+    if args or set(kwargs) != {"run_id"} or not isinstance(kwargs["run_id"], str):
+        return None
+    try:
+        run_id = uuid.UUID(kwargs["run_id"])
+    except ValueError:
+        return None
+    return run_id if str(run_id) == kwargs["run_id"] else None
 
 
 def publisher(settings: Settings, celery_app, environ: Mapping[str, str] = os.environ) -> CeleryPublisher:
