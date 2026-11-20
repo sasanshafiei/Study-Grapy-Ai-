@@ -114,6 +114,47 @@ class Settings(BaseSettings):
     index_task_soft_time_limit_seconds: int = Field(default=240, ge=2)
     index_task_time_limit_seconds: int = Field(default=270, ge=3)
 
+    # --- courses and enrollment (M5, see docs/courses-api.md) ----------------------------
+    # Join attempts per user per window. Enforced in this process only: with more
+    # than one API process or replica the effective limit is multiplied, so a
+    # shared (e.g. Redis) limiter is required before a multi-replica deployment.
+    join_rate_limit_attempts: int = Field(default=10, ge=1, le=1000)
+    join_rate_limit_window_seconds: float = Field(default=300.0, gt=0, le=86400)
+    # Most users tracked at once; the least recently seen is forgotten beyond it.
+    join_rate_limit_max_users: int = Field(default=10_000, ge=100, le=1_000_000)
+
+    # --- course chat (M5, see docs/ai-chat-integration.md) ------------------------------
+    # Off by default. While off, POST /courses/{id}/chat answers 503 after the
+    # caller's course access was checked, and nothing is sent to the AI service.
+    chat_enabled: bool = False
+    # Answer scopes callers may request, comma-separated. Only class_only by
+    # default; class_plus_web is refused here until live web search has its own
+    # milestone. A scope that is not enabled is refused, never replaced.
+    chat_enabled_scopes: str = "class_only"
+    # Request body: bytes actually received (not only Content-Length) and the time to receive it.
+    chat_max_body_bytes: int = Field(default=16 * 1024, ge=256, le=MIB)
+    chat_body_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    chat_max_question_chars: int = Field(default=2000, ge=1, le=20_000)
+    # Concurrent chat requests in this process, in total and per user. A request
+    # that finds no free slot is refused at once (429), it does not wait.
+    chat_max_concurrent: int = Field(default=8, ge=1, le=1000)
+    chat_max_concurrent_per_user: int = Field(default=1, ge=1, le=100)
+    # Upstream HTTP bounds. Connect/read/write are inactivity timeouts; the
+    # deadlines are absolute wall-clock bounds over the whole call.
+    chat_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    chat_read_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    chat_probe_deadline_seconds: float = Field(default=5.0, gt=0, le=60)
+    chat_answer_deadline_seconds: float = Field(default=60.0, gt=0, le=600)
+    # Absolute bound on handing the opening, and later the verified frames, to
+    # the ASGI server (a connected client that stops reading cannot keep a slot).
+    chat_delivery_deadline_seconds: float = Field(default=15.0, gt=0, le=120)
+    chat_max_response_bytes: int = Field(default=256 * 1024, ge=1024, le=8 * MIB)
+    # Capability probe results are reused for this long (at most 5 minutes).
+    chat_capabilities_cache_seconds: float = Field(default=30.0, ge=0, le=300)
+    chat_max_answer_chars: int = Field(default=8000, ge=100, le=100_000)
+    chat_max_citations: int = Field(default=16, ge=1, le=64)
+    chat_max_topics: int = Field(default=16, ge=0, le=256)
+
     @model_validator(mode="after")
     def _ordered_limits(self) -> "Settings":
         """parse timeout < soft limit < hard limit (< lease), visibility timeout above both."""
@@ -144,6 +185,13 @@ class Settings(BaseSettings):
             )
         if self.broker_visibility_timeout_seconds <= 2 * self.index_task_time_limit_seconds:
             raise ValueError("BROKER_VISIBILITY_TIMEOUT_SECONDS must exceed twice INDEX_TASK_TIME_LIMIT_SECONDS")
+        from .chat.scopes import parse_enabled_scopes  # local: chat imports Settings
+
+        parse_enabled_scopes(self.chat_enabled_scopes)  # raises ValueError for an unknown or unavailable scope
+        if self.chat_max_concurrent_per_user > self.chat_max_concurrent:
+            raise ValueError("CHAT_MAX_CONCURRENT_PER_USER must not exceed CHAT_MAX_CONCURRENT")
+        if self.chat_probe_deadline_seconds >= self.chat_answer_deadline_seconds:
+            raise ValueError("CHAT_PROBE_DEADLINE_SECONDS must be below CHAT_ANSWER_DEADLINE_SECONDS")
         return self
 
     @property

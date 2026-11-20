@@ -37,7 +37,7 @@ pass the same files to every command below.
 ```bash
 docker compose up -d --build                       # start the stack (rebuild after dependency changes)
 docker compose exec core-api alembic upgrade head  # create / update the schema
-docker compose exec core-api alembic current       # revision the database is at, e.g. "0003 (head)"
+docker compose exec core-api alembic current       # revision the database is at, e.g. "0004 (head)"
 docker compose exec core-api alembic history       # all revisions
 docker compose exec core-api alembic check         # models vs. database: expect "No new upgrade operations detected."
 docker compose exec core-api alembic upgrade head --sql   # print the SQL only, connect to nothing
@@ -118,6 +118,24 @@ downgrade restores the 0002 schema exactly.
 **Order.** Migrate before starting the M3 workers: they check the revision at start and
 exit (status 78) otherwise. After migrating, bind the upload store once with
 `python -m app.ingestion.admin init-storage --database <name>`.
+
+## Revision 0004: course code and course/enrollment indexes (M5)
+
+Adds `courses.code` (`VARCHAR(32) NOT NULL DEFAULT ''`; stored once, no table rewrite)
+with the CHECK `courses_code_check` (trimmed, no control characters), and the indexes
+`courses_owner_id_idx`, `enrollments_course_id_idx` and `topics_course_id_idx` for the
+M5 course list, student counts and topic list. Existing courses get `''`, the
+documented "no code recorded" fallback ([courses-api.md](courses-api.md)). Nothing
+else changes: nullability was checked against the scaffold (all relevant columns are
+already `NOT NULL`, `join_code` is already unique), so no constraint is tightened and
+no preflight on existing data is needed. The upgrade first locks `courses`,
+`enrollments` and `topics` (`SHARE ROW EXCLUSIVE`, fixed order, until commit).
+
+**Downgrade guard.** `alembic downgrade 0003` (or lower) is refused, before any change,
+while any course has a non-empty `code` (it would be lost). Clear codes on purpose
+first. Without codes the downgrade restores the 0003 schema exactly.
+
+**Order.** Migrate before starting workers: they now require revision `0004`.
 
 ## Safety guard: which database a migration may touch
 
@@ -315,6 +333,13 @@ database at head.
   - a downgrade without M3 state restores 0002 exactly and upgrades again; with any
     kind of M3 state it is refused and nothing changes;
   - the historical baseline is unchanged after going through 0003.
+- Revision `0004`:
+  - upgrading from 0003 with representative data keeps every row and table OID and
+    gives every existing course the empty code;
+  - the code CHECK (trimmed, printable), NOT NULL and length;
+  - a downgrade without codes restores 0003 exactly and upgrades again; with a code it
+    is refused (also from rendered SQL) and nothing changes;
+  - the historical baseline is unchanged after going through 0004.
 - Baseline `0001`:
   - the catalog snapshot equals the scaffold;
   - PK, FK, unique, NOT NULL and default behaviour hold;

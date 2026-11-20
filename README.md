@@ -41,7 +41,7 @@ check everything is wired:
 
 ```bash
 docker compose exec core-api alembic upgrade head
-docker compose exec core-api alembic current   # expect: 0003 (head)
+docker compose exec core-api alembic current   # expect: 0004 (head)
 docker compose exec core-api python -m app.ingestion.admin init-storage --database studygraph   # once
 
 curl localhost:8000/health        # core-api up
@@ -100,7 +100,9 @@ docs/decisions/   one short file per locked decision
 
 1. ~~Swap `init_db.py` for **Alembic** migrations~~ Done: see [docs/database-migrations.md](docs/database-migrations.md).
 2. Add routers under `app/routers/`: ~~`documents` (upload, list)~~ done, see
-   [docs/document-ingestion.md](docs/document-ingestion.md); `courses`, `chat` (proxy to ai-service).
+   [docs/document-ingestion.md](docs/document-ingestion.md); ~~`courses`, `chat`~~ done (M5), see
+   [docs/courses-api.md](docs/courses-api.md) and [docs/ai-chat-integration.md](docs/ai-chat-integration.md)
+   (chat is off by default and needs the AI service's studygraph.chat/1).
 3. Stand up the Celery worker and a first parse job.
 4. Build the external-source connectors (OpenStax, Wikipedia) and the harvester.
 

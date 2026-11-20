@@ -151,6 +151,12 @@ def test_no_endpoint_exposes_parsed_content():
     paths = create_app().openapi()["paths"]
     assert {path: sorted(methods) for path, methods in paths.items()} == {
         "/api/v1/courses/{course_id}/documents": ["get", "post"],
+        # M5: course list/create/join and topics (no document content), and chat, whose
+        # snippets come from verified retrieval chunks, never from document_sections.
+        "/api/v1/courses": ["get", "post"],
+        "/api/v1/courses/join": ["post"],
+        "/api/v1/courses/{course_id}/topics": ["get"],
+        "/api/v1/courses/{course_id}/chat": ["post"],
         "/health": ["get"],
         "/health/db": ["get"],
     }

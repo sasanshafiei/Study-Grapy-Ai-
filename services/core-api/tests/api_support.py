@@ -94,6 +94,7 @@ class World:
     users: list[uuid.UUID] = field(default_factory=list)
     courses: list[uuid.UUID] = field(default_factory=list)
     documents: list[uuid.UUID] = field(default_factory=list)
+    sources: list[uuid.UUID] = field(default_factory=list)
 
     def _one(self, sql: str, **params):
         with self.engine.begin() as connection:
@@ -123,15 +124,51 @@ class World:
         self.users.append(user_id)
         return CurrentUser(id=user_id, role=role, status=status)
 
-    def course(self, owner: CurrentUser, name: str = "General Chemistry") -> uuid.UUID:
-        course_id = self._one(
-            "INSERT INTO courses (owner_id, name, join_code) VALUES (:owner, :name, :code) RETURNING id",
-            owner=owner.id,
-            name=name,
-            code=uuid.uuid4().hex[:12],
-        )
+    def course(
+        self, owner: CurrentUser, name: str = "General Chemistry", *, code: str | None = None,
+        join_code: str | None = None,
+    ) -> uuid.UUID:
+        """A course row; without `code` it is a legacy-style row (the column default, '')."""
+        columns = {"owner": owner.id, "name": name, "join": join_code or uuid.uuid4().hex[:12]}
+        if code is None:
+            sql = "INSERT INTO courses (owner_id, name, join_code) VALUES (:owner, :name, :join) RETURNING id"
+        else:
+            sql = "INSERT INTO courses (owner_id, name, join_code, code) VALUES (:owner, :name, :join, :code) RETURNING id"
+            columns["code"] = code
+        course_id = self._one(sql, **columns)
         self.courses.append(course_id)
         return course_id
+
+    def track_course(self, course_id: uuid.UUID | str) -> None:
+        """Clean up a course created through the API."""
+        self.courses.append(uuid.UUID(str(course_id)))
+
+    def topic(self, course_id: uuid.UUID, name: str) -> uuid.UUID:
+        return self._one("INSERT INTO topics (course_id, name) VALUES (:c, :n) RETURNING id", c=course_id, n=name)
+
+    def source(self, enabled: bool = True, kind: str = "openstax") -> uuid.UUID:
+        source_id = self._one(
+            "INSERT INTO sources (kind, domain, licence, enabled) VALUES (:k, 'openstax.org', 'CC BY 4.0', :e) "
+            "RETURNING id",
+            k=kind,
+            e=enabled,
+        )
+        self.sources.append(source_id)
+        return source_id
+
+    def chunk(
+        self, document_id: uuid.UUID, course_id: uuid.UUID | None, text_value: str, *, origin: str = "class",
+        locator: dict | None = None,
+    ) -> uuid.UUID:
+        return self._one(
+            "INSERT INTO chunks (document_id, course_id, origin, text, locator) "
+            "VALUES (:d, :c, :o, :t, CAST(:l AS jsonb)) RETURNING id",
+            d=document_id,
+            c=course_id,
+            o=origin,
+            t=text_value,
+            l=json.dumps({"page": 1} if locator is None else locator),
+        )
 
     def enroll(self, user: CurrentUser, course_id: uuid.UUID, role: str = "student") -> None:
         self.execute(
@@ -154,6 +191,16 @@ class World:
 
     def cleanup(self) -> None:
         with self.engine.begin() as connection:
+            # M5: chunks, their topic links and topics of this test's courses and documents.
+            doc_filter = "document_id IN (SELECT id FROM documents WHERE course_id = ANY(:c) OR id = ANY(:d))"
+            ids = {"c": self.courses, "d": self.documents}
+            connection.execute(
+                text(f"DELETE FROM chunk_topics WHERE chunk_id IN (SELECT id FROM chunks WHERE {doc_filter} "
+                     "OR course_id = ANY(:c)) OR topic_id IN (SELECT id FROM topics WHERE course_id = ANY(:c))"),
+                ids,
+            )  # fmt: skip
+            connection.execute(text(f"DELETE FROM chunks WHERE {doc_filter} OR course_id = ANY(:c)"), ids)
+            connection.execute(text("DELETE FROM topics WHERE course_id = ANY(:c)"), ids)
             if self.courses:
                 connection.execute(text("DELETE FROM documents WHERE course_id = ANY(:ids)"), {"ids": self.courses})
             if self.documents:
@@ -161,8 +208,15 @@ class World:
             if self.courses:
                 connection.execute(text("DELETE FROM enrollments WHERE course_id = ANY(:ids)"), {"ids": self.courses})
                 connection.execute(text("DELETE FROM courses WHERE id = ANY(:ids)"), {"ids": self.courses})
+            if self.sources:
+                connection.execute(text("DELETE FROM documents WHERE source_id = ANY(:ids)"), {"ids": self.sources})
+                connection.execute(text("DELETE FROM sources WHERE id = ANY(:ids)"), {"ids": self.sources})
             if self.users:
                 connection.execute(text("DELETE FROM enrollments WHERE user_id = ANY(:ids)"), {"ids": self.users})
+                # Courses created through the API by this test's users (POST /courses).
+                connection.execute(text("DELETE FROM enrollments WHERE course_id IN (SELECT id FROM courses WHERE owner_id = ANY(:ids))"), {"ids": self.users})
+                connection.execute(text("DELETE FROM topics WHERE course_id IN (SELECT id FROM courses WHERE owner_id = ANY(:ids))"), {"ids": self.users})
+                connection.execute(text("DELETE FROM courses WHERE owner_id = ANY(:ids)"), {"ids": self.users})
                 connection.execute(text("DELETE FROM users WHERE id = ANY(:ids)"), {"ids": self.users})
             # The storage identity is per test (each test has its own directories).
             connection.execute(text("DELETE FROM storage_identity"))
@@ -184,11 +238,14 @@ class ApiHarness:
         max_upload_bytes: int = 25 * 1024 * 1024,
         publisher=_UNSET,
         bind: bool = True,
+        settings_overrides: dict | None = None,
     ) -> None:
         self.world = world
         self.session_factory: sessionmaker[Session] = sessionmaker(bind=world.engine, autoflush=False)
         self.upload_root = tmp_path / "uploads"
-        self.settings = Settings(upload_dir=self.upload_root, max_upload_bytes=max_upload_bytes)
+        self.settings = Settings(
+            upload_dir=self.upload_root, max_upload_bytes=max_upload_bytes, **(settings_overrides or {})
+        )
         self.storage = LocalFileStorage(self.upload_root)
         if bind:
             bind_storage(world.engine, self.upload_root)
@@ -280,9 +337,11 @@ def asgi_call(
     *,
     disconnect_after_chunks: bool = False,
     on_receive: Callable[[], None] | None = None,
+    stall_send_after: int | None = None,
 ) -> AsgiResult:
     """Call the ASGI app directly. The body is sent as `chunks`; optionally the
-    client then disconnects instead of finishing the request."""
+    client then disconnects instead of finishing the request. With `stall_send_after=n`, the n+1-th call
+    to ASGI `send` never returns (a connected client that stops reading) and no disconnect is ever sent."""
     messages: list[dict] = []
     for index, chunk in enumerate(chunks):
         last = index == len(chunks) - 1
@@ -304,6 +363,8 @@ def asgi_call(
         await asyncio.sleep(3600)  # nothing more to send; the app must not wait for it
 
     async def send(message):
+        if stall_send_after is not None and len(sent) >= stall_send_after:
+            await asyncio.Event().wait()
         sent.append(message)
 
     scope = {
