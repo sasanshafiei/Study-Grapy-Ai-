@@ -4,12 +4,15 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .celery_app import make_celery
+from .chat.client import AiChatClient
 from .config import Settings
 from .config import settings as default_settings
 from .db import SessionLocal, get_db
 from .errors import ApiError, api_error_handler, unhandled_error_handler
+from .indexing.client import InvalidServiceUrl
 from .ingestion.dispatch import CeleryPublisher, Publisher
-from .routers import documents
+from .limits import ConcurrencyLimiter, RateLimiter
+from .routers import chat, courses, documents
 from .storage import LocalFileStorage
 
 _DEFAULT = object()
@@ -20,6 +23,7 @@ def create_app(
     session_factory: sessionmaker[Session] | None = None,
     storage: LocalFileStorage | None = None,
     publisher: Publisher | None | object = _DEFAULT,
+    chat_client: AiChatClient | None | object = _DEFAULT,
 ) -> FastAPI:
     """Build the application.
 
@@ -29,6 +33,10 @@ def create_app(
     the real upload directory or the real broker. Pass publisher=None to
     publish nothing after uploads (the dispatch sweep still does). Building
     the app connects to nothing and creates nothing.
+
+    M5: the chat client (AI_SERVICE_URL; None when that URL is invalid, which
+    makes chat answer 503) and the in-process limiters live on app.state too,
+    so every application instance has its own.
     """
     settings = settings or default_settings
     app = FastAPI(title="StudyGraph Core API", version="0.1.0")
@@ -38,6 +46,16 @@ def create_app(
     if publisher is _DEFAULT:
         publisher = CeleryPublisher(make_celery(settings), settings) if settings.dispatch_on_upload else None
     app.state.publisher = publisher
+    if chat_client is _DEFAULT:
+        try:
+            chat_client = AiChatClient(settings)
+        except InvalidServiceUrl:
+            chat_client = None
+    app.state.chat_client = chat_client
+    app.state.chat_limiter = ConcurrencyLimiter(settings.chat_max_concurrent, settings.chat_max_concurrent_per_user)
+    app.state.join_rate_limiter = RateLimiter(
+        settings.join_rate_limit_attempts, settings.join_rate_limit_window_seconds, settings.join_rate_limit_max_users
+    )
 
     # Wide-open CORS for development so web + mobile can call freely.
     # Tighten this before any public deployment.
@@ -50,6 +68,8 @@ def create_app(
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_exception_handler(Exception, unhandled_error_handler)  # JSON 500, details only in the log
     app.include_router(documents.router)
+    app.include_router(courses.router)
+    app.include_router(chat.router)
 
     @app.get("/health")
     def health():
@@ -69,7 +89,6 @@ def create_app(
 
 app = create_app()
 
-# TODO (CE-1): add routers under app/routers/ for courses, chat (proxy to
-# ai-service), quizzes, exams, admin. Keep them thin — they validate input,
+# TODO (CE-1): add routers under app/routers/ for quizzes, exams, admin. Keep them thin — they validate input,
 # call the AI service or the DB, and shape the response. Authentication is
 # CE-3's app.auth.get_current_user.
