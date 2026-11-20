@@ -34,7 +34,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
 
@@ -64,18 +64,37 @@ class User(Base):
 
 
 class Course(Base):
+    """A course, owned by one professor.
+
+    Revision 0004 added `code` (the short course code shown next to the name,
+    e.g. "CHEM 101"). Courses created before it carry the empty string, the
+    documented fallback for "no code recorded" (docs/courses-api.md).
+
+    join_code keeps the baseline's case-sensitive unique constraint. New codes
+    are generated in upper case; a join prefers an exact match and otherwise
+    tries the upper-case form of what the student typed (app/services/courses.py).
+    """
+
     __tablename__ = "courses"
+    __table_args__ = (
+        CheckConstraint("code = btrim(code) AND code !~ '[[:cntrl:]]'", name="code"),
+        Index(None, "owner_id"),
+    )
 
     id: Mapped[uuid.UUID] = pk()
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))  # the professor
     name: Mapped[str] = mapped_column(String(150))
     join_code: Mapped[str] = mapped_column(String(12), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # --- added by revision 0004 ---
+    code: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("''::character varying"))
 
 
 class Enrollment(Base):
+    """Membership of a user in a course; role `student` grants student access (M5 joins)."""
+
     __tablename__ = "enrollments"
-    __table_args__ = (UniqueConstraint("user_id", "course_id"),)
+    __table_args__ = (UniqueConstraint("user_id", "course_id"), Index(None, "course_id"))
 
     id: Mapped[uuid.UUID] = pk()
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
@@ -317,6 +336,7 @@ class Chunk(Base):
 
 class Topic(Base):
     __tablename__ = "topics"
+    __table_args__ = (Index(None, "course_id"),)
 
     id: Mapped[uuid.UUID] = pk()
     course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"))

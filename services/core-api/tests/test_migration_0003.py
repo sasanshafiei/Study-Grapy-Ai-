@@ -128,7 +128,7 @@ def test_upgrade_from_0002_keeps_every_row_and_makes_queued_jobs_dispatchable(
 
 def test_fresh_upgrade_to_head_and_new_columns(scratch3, disposable_engine, alembic):
     alembic("upgrade", "head")
-    assert _current(alembic) == f"{REVISION} (head)"
+    assert _current(alembic).endswith("(head)")  # 0003 or a later head
     columns = {name: (dtype, nullable, default) for name, dtype, nullable, default in _columns(disposable_engine, "ingestion_jobs")}
     assert columns["attempt_token"] == ("uuid", "YES", None)
     assert columns["lease_expires_at"] == ("timestamp with time zone", "YES", None)
@@ -331,7 +331,7 @@ def test_downgrade_without_m3_state_restores_0002_exactly_and_upgrades_again(
     assert _snapshot(disposable_engine) == snapshot_0002
     assert _table_contents(disposable_engine, M2_TABLES) == contents
     alembic("upgrade", "head")
-    assert _current(alembic) == f"{REVISION} (head)"
+    assert _current(alembic).endswith("(head)")  # 0003 or a later head
 
 
 @pytest.mark.parametrize("state", ["section", "running", "token", "lease_only", "dispatched", "backoff", "identity"])
@@ -370,7 +370,7 @@ def test_downgrade_refuses_while_m3_state_exists(
 
     assert _snapshot(disposable_engine) == before
     assert _table_contents(disposable_engine, tables) == contents
-    assert _current(alembic) == f"{REVISION} (head)"
+    assert _current(alembic).split()[0] == REVISION
 
 
 def test_queued_job_due_now_does_not_block_the_downgrade(scratch3, disposable_engine, alembic, committed_transaction):
