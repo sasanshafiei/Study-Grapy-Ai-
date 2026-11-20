@@ -580,3 +580,13 @@ request at start-up. Mixing the harvest or index queue with any other queue is r
 The maintenance worker additionally runs `harvest.maintain` (Beat entry
 `harvest-maintenance`): lease recovery and history cleanup always, scheduling and
 dispatch only while `HARVEST_ENABLED`. See [external-harvesting.md](external-harvesting.md).
+
+## M7 addendum: quiz session recovery
+
+Every worker role now requires schema revision `0006`. The existing lease-recovery task
+(`recover_stale_parse_jobs`, Beat, every `RECOVERY_INTERVAL_SECONDS`) also turns quiz
+sessions still `generating` after their lease expired (database time) into `failed` /
+`lease_expired`, in batches of `RECOVERY_BATCH_SIZE` with `FOR UPDATE SKIP LOCKED`, and
+deletes quiz quota counters older than `QUIZ_QUOTA_RETENTION_DAYS`. It runs whether or
+not quizzes are enabled and contacts no AI service. No new worker or queue exists for M7:
+generation is synchronous in the API ([quiz-api.md](quiz-api.md)).

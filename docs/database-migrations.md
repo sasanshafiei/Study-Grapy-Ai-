@@ -176,6 +176,57 @@ exactly (tested against a snapshot).
 
 **Order.** Migrate before starting workers: they now require revision `0005`.
 
+## Revision 0006: quizzes, graded attempts and practice statistics (M7)
+
+Adds `quiz_sessions`, `quiz_items`, `topic_practice_stats` and `quiz_generation_quotas`;
+the generation columns of `questions` (`hint`, `answer_key`, `grading_method`,
+`generated_by_session_id`, `generated_for_user_id`, `generation`, `content_hash`) and the
+grading columns of `attempts` (`course_id`, `quiz_item_id`, `answer`, `grading_method`,
+`feedback`, `mastery_before`, `mastery_after`, `mastery_method`, `stats_attempts`,
+`stats_correct`, `submitted_at`); `topics_id_course_id_key`, the target of every
+course-consistent topic key ([quiz-api.md](quiz-api.md), "Data model").
+
+- **Legacy rows.** Every new questions/attempts column is NULL for existing rows except
+  `attempts.course_id`, which is backfilled from `questions.course_id` (deterministic; the
+  question is NOT NULL) and then made NOT NULL. A legacy-style `INSERT INTO attempts`
+  without `course_id` still works: the attempts trigger derives it the same way. New CHECKs
+  on `questions.purpose/qtype/difficulty/status` admit every value the application ever
+  wrote (`practice|exam`, `mcq|true_false|short`, `easy|medium|hard`,
+  `draft|approved|generated|retired`).
+- **Preflight** (`DO $migration_0006_preflight$`, after locking `topics`, `questions`,
+  `attempts`): stops before any change while a question carries an unknown
+  purpose/type/difficulty/status (or already says `generated`), or a question or attempt
+  references a topic of another course. Inspect and correct such rows first.
+- **NULL semantics.** A CHECK passes when it evaluates to UNKNOWN. The generated branch of
+  `questions_generated_check` and the graded branch of `attempts_practice_check` are therefore
+  `(...) IS TRUE` (a NULL `grading_method`, `mastery_method` or an `answer_key` without
+  `choice_id` is refused); the legacy branches only use `IS [NOT] NULL` on NOT NULL columns.
+  A generated question's `answer_key` must be exactly `{"choice_id": <id of one of its
+  choices>}`. The composite keys are `MATCH SIMPLE`: they are not checked for legacy rows (whose new columns
+  are NULL) and fully checked for M7 rows, whose CHECKs require every key column.
+- **Triggers** (not part of the reflected-schema comparison; tested in
+  `tests/test_migration_0006.py`): `questions_guard`, `quiz_items_guard`,
+  `quiz_sessions_guard`, `attempts_guard` with the functions `studygraph_*_guard()`.
+  Generated questions, assignments, completed sessions and graded attempts cannot be
+  updated or deleted; legacy questions and attempts stay editable. A generated question can only
+  be answered through its assignment in a `ready` session: a legacy-style `INSERT` naming it, or an
+  `UPDATE` moving a legacy attempt onto it, is refused. A session cannot be inserted `ready`
+  (`quiz_sessions_insert_guard`, AFTER INSERT so its own CHECKs are reported first). Question and
+  assignment inserts lock the session row `FOR SHARE`, and finalization is an `UPDATE` of that row,
+  so adding rows and finalizing cannot interleave around the state guards (tested with two
+  concurrent transactions).
+- **Deliberate removal** of M7 rows (e.g. a data-protection request) is an operator task:
+  as the table owner, in one transaction, `ALTER TABLE ... DISABLE TRIGGER <guard>`, delete
+  in the order attempts, topic_practice_stats, quiz_generation_quotas, quiz_items, questions,
+  quiz_sessions, then `ENABLE TRIGGER` again (`tests/api_support.py::remove_quiz_state`).
+- **Downgrade guard.** `alembic downgrade 0005` (or lower) is refused, before any change,
+  while any quiz session, assignment, practice statistic, quota row, graded attempt or
+  generated/M7-annotated question exists. Without M7 state the downgrade restores the 0005
+  contents exactly (tested with a checksum of every legacy table).
+
+**Order.** Migrate before starting workers: they now require revision `0006`. The running
+M6 development environment stays at 0005 until it is deliberately migrated.
+
 ## Safety guard: which database a migration may touch
 
 `app/migration_safety.py` holds the checks; `migrations/env.py` applies them.
