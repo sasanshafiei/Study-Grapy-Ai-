@@ -381,7 +381,10 @@ _CONSTRAINT_KINDS = {"p": "PRIMARY KEY", "f": "FOREIGN KEY", "u": "UNIQUE", "c":
 def _orm_constraint_names(table) -> set[tuple[str, str]]:
     """(name, kind) of every constraint the ORM emits for `table`."""
     ddl = str(CreateTable(table).compile(dialect=PG))
-    return set(re.findall(r"CONSTRAINT (\w+) (PRIMARY KEY|FOREIGN KEY|UNIQUE|CHECK|EXCLUDE)", ddl))
+    names = set(re.findall(r"CONSTRAINT (\w+) (PRIMARY KEY|FOREIGN KEY|UNIQUE|CHECK|EXCLUDE)", ddl))
+    # use_alter keys (cyclic table references, M6) are not part of CREATE TABLE: they are added by ALTER TABLE.
+    names |= {(c.name, "FOREIGN KEY") for c in table.foreign_key_constraints if c.use_alter}
+    return names
 
 
 def _db_constraint_names(connection, table_name: str) -> set[tuple[str, str]]:
