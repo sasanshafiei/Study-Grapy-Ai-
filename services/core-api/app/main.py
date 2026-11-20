@@ -12,7 +12,8 @@ from .errors import ApiError, api_error_handler, unhandled_error_handler
 from .indexing.client import InvalidServiceUrl
 from .ingestion.dispatch import CeleryPublisher, Publisher
 from .limits import ConcurrencyLimiter, RateLimiter
-from .routers import chat, courses, documents
+from .quiz.client import AiQuizClient
+from .routers import chat, courses, documents, quizzes
 from .storage import LocalFileStorage
 
 _DEFAULT = object()
@@ -24,6 +25,7 @@ def create_app(
     storage: LocalFileStorage | None = None,
     publisher: Publisher | None | object = _DEFAULT,
     chat_client: AiChatClient | None | object = _DEFAULT,
+    quiz_client: AiQuizClient | None | object = _DEFAULT,
 ) -> FastAPI:
     """Build the application.
 
@@ -37,6 +39,10 @@ def create_app(
     M5: the chat client (AI_SERVICE_URL; None when that URL is invalid, which
     makes chat answer 503) and the in-process limiters live on app.state too,
     so every application instance has its own.
+
+    M7: the quiz client (None when AI_SERVICE_URL is invalid: generation then
+    answers 503, already issued quizzes and local grading keep working) and the
+    generation limiter live on app.state as well.
     """
     settings = settings or default_settings
     app = FastAPI(title="StudyGraph Core API", version="0.1.0")
@@ -52,6 +58,13 @@ def create_app(
         except InvalidServiceUrl:
             chat_client = None
     app.state.chat_client = chat_client
+    if quiz_client is _DEFAULT:
+        try:
+            quiz_client = AiQuizClient(settings)
+        except InvalidServiceUrl:
+            quiz_client = None
+    app.state.quiz_client = quiz_client
+    app.state.quiz_limiter = ConcurrencyLimiter(settings.quiz_max_concurrent, 1)
     app.state.chat_limiter = ConcurrencyLimiter(settings.chat_max_concurrent, settings.chat_max_concurrent_per_user)
     app.state.join_rate_limiter = RateLimiter(
         settings.join_rate_limit_attempts, settings.join_rate_limit_window_seconds, settings.join_rate_limit_max_users
@@ -70,6 +83,7 @@ def create_app(
     app.include_router(documents.router)
     app.include_router(courses.router)
     app.include_router(chat.router)
+    app.include_router(quizzes.router)
 
     @app.get("/health")
     def health():
@@ -89,6 +103,6 @@ def create_app(
 
 app = create_app()
 
-# TODO (CE-1): add routers under app/routers/ for quizzes, exams, admin. Keep them thin — they validate input,
+# TODO (CE-1): add routers under app/routers/ for exams, admin. Keep them thin — they validate input,
 # call the AI service or the DB, and shape the response. Authentication is
 # CE-3's app.auth.get_current_user.
