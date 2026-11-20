@@ -33,6 +33,7 @@ from .celery_app import (
 from .config import settings
 from .harvest import executor as harvest_executor
 from .harvest import maintenance as harvest_maintenance
+from .quiz import generation as quiz_generation
 from .indexing import pipeline as index_pipeline
 from .ingestion import dispatch, jobs, pipeline, reconcile, runtime
 
@@ -134,6 +135,11 @@ def recover_stale_parse_jobs(*args, **kwargs):
         # running attempt whose lease expired is dead either way.
         result = jobs.recover_expired_leases(ctx.session_factory, settings, kind="index")
         log.info("index_lease_recovery requeued=%d failed=%d", len(result.requeued), len(result.failed))
+        # M7: generating quiz sessions whose lease expired become failed (the API also recovers a
+        # student's own expired session on their next request); old quota counters are removed.
+        recovered = quiz_generation.recover_expired(ctx.session_factory, settings.recovery_batch_size)
+        removed = quiz_generation.cleanup_quotas(ctx.session_factory, settings.quiz_quota_retention_days)
+        log.info("quiz_lease_recovery failed=%d quota_rows_removed=%d", len(recovered), removed)
 
 
 @celery_app.task(name=RECONCILE_TASK, **_MAINTENANCE_LIMITS)

@@ -213,6 +213,37 @@ class Settings(BaseSettings):
     # without being claimed and without consuming an attempt.
     external_index_defer_seconds: int = Field(default=900, ge=10, le=86400)
 
+    # --- quizzes and graded practice (M7, see docs/quiz-api.md) ----------------------------
+    # Master switch, off by default: while off every quiz endpoint answers 503 after the
+    # caller's course access was checked. Generation and attempts have their own switches
+    # (effective only while QUIZ_ENABLED is on): turning generation off, or losing the AI
+    # service, never stops access to quizzes already issued or their local grading.
+    quiz_enabled: bool = False
+    quiz_generation_enabled: bool = True
+    quiz_attempts_enabled: bool = True
+    # Only class_only exists in M7; any other scope is refused at start-up.
+    quiz_enabled_scopes: str = "class_only"
+    quiz_max_body_bytes: int = Field(default=4096, ge=256, le=64 * 1024)
+    quiz_body_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    quiz_max_questions: int = Field(default=10, ge=1, le=10)
+    quiz_max_topics: int = Field(default=5, ge=1, le=5)
+    # Concurrent generations in this process (per user: one, also enforced by the database).
+    quiz_max_concurrent: int = Field(default=4, ge=1, le=1000)
+    # Generations a student may start per UTC day (database counter, reserved before any upstream call).
+    quiz_daily_generation_quota: int = Field(default=20, ge=1, le=10_000)
+    quiz_quota_retention_days: int = Field(default=14, ge=2, le=3650)
+    # Upstream HTTP bounds (inactivity timeouts) and absolute deadlines. The pipeline deadline
+    # covers the probe, the generation request, validation and the persistence checkpoint.
+    quiz_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    quiz_read_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    quiz_probe_deadline_seconds: float = Field(default=5.0, gt=0, le=60)
+    quiz_generate_deadline_seconds: float = Field(default=45.0, gt=0, le=600)
+    quiz_pipeline_deadline_seconds: float = Field(default=60.0, gt=0, le=900)
+    # The generation lease (database time) is the pipeline deadline plus this margin.
+    quiz_lease_margin_seconds: int = Field(default=30, ge=5, le=600)
+    quiz_max_response_bytes: int = Field(default=256 * 1024, ge=4096, le=4 * MIB)
+    quiz_capabilities_cache_seconds: float = Field(default=30.0, ge=0, le=300)
+
     @model_validator(mode="after")
     def _ordered_limits(self) -> "Settings":
         """parse timeout < soft limit < hard limit (< lease), visibility timeout above both."""
@@ -269,7 +300,22 @@ class Settings(BaseSettings):
             raise ValueError("CHAT_MAX_CONCURRENT_PER_USER must not exceed CHAT_MAX_CONCURRENT")
         if self.chat_probe_deadline_seconds >= self.chat_answer_deadline_seconds:
             raise ValueError("CHAT_PROBE_DEADLINE_SECONDS must be below CHAT_ANSWER_DEADLINE_SECONDS")
+        from .quiz.scopes import parse_quiz_scopes  # local, dependency-free
+
+        parse_quiz_scopes(self.quiz_enabled_scopes)  # raises ValueError: only class_only exists in M7
+        if not (
+            self.quiz_probe_deadline_seconds + self.quiz_generate_deadline_seconds
+            < self.quiz_pipeline_deadline_seconds
+        ):
+            raise ValueError(
+                "QUIZ_PROBE_DEADLINE_SECONDS + QUIZ_GENERATE_DEADLINE_SECONDS < QUIZ_PIPELINE_DEADLINE_SECONDS is required"
+            )
         return self
+
+    @property
+    def quiz_lease_seconds(self) -> int:
+        """Lease of a generating quiz session: the pipeline deadline plus a margin (database time)."""
+        return int(self.quiz_pipeline_deadline_seconds + 0.999) + self.quiz_lease_margin_seconds
 
     @property
     def index_lease_seconds(self) -> int:

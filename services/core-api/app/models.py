@@ -14,13 +14,14 @@ Design notes:
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -34,7 +35,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -662,7 +663,8 @@ class Chunk(Base):
 
 class Topic(Base):
     __tablename__ = "topics"
-    __table_args__ = (Index(None, "course_id"),)
+    # (id, course_id) is unique since revision 0006: the target of every course-consistent topic key.
+    __table_args__ = (Index(None, "course_id"), UniqueConstraint("id", "course_id"))
 
     id: Mapped[uuid.UUID] = pk()
     course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"))
@@ -680,38 +682,285 @@ class ChunkTopic(Base):
 
 # --- Practice & learner model --------------------------------------------
 
+
+# --- Revision 0006 (M7, docs/quiz-api.md): quizzes, graded attempts, baseline statistics ---
+QUESTION_PURPOSES = ("practice", "exam")
+QUESTION_TYPES = ("mcq", "true_false", "short")
+QUESTION_DIFFICULTIES = ("easy", "medium", "hard")
+QUESTION_STATUSES = ("draft", "approved", "generated", "retired")
+QUIZ_SESSION_STATUSES = ("generating", "ready", "failed")
+
+
+class QuizSession(Base):
+    """One quiz generation request of one student in one course (M7, revision 0006).
+
+    generating -> ready | failed; ready and failed are terminal (database trigger). There is
+    deliberately no foreign key to enrollments: practice history outlives course membership,
+    which authorization checks on every request instead.
+    """
+
+    __tablename__ = "quiz_sessions"
+    __table_args__ = (
+        CheckConstraint("status IN ('generating', 'ready', 'failed')", name="status"),
+        CheckConstraint(
+            "(status = 'generating' AND attempt_token IS NOT NULL AND lease_expires_at IS NOT NULL"
+            " AND failure_code IS NULL AND completed_at IS NULL AND protocol IS NULL AND service IS NULL)"
+            " OR (status = 'ready' AND attempt_token IS NULL AND lease_expires_at IS NULL AND failure_code IS NULL"
+            " AND completed_at IS NOT NULL AND protocol IS NOT NULL AND service IS NOT NULL)"
+            " OR (status = 'failed' AND attempt_token IS NULL AND lease_expires_at IS NULL AND failure_code IS NOT NULL"
+            " AND failure_code ~ '^[a-z][a-z0-9_]{0,39}$' AND completed_at IS NOT NULL)",
+            name="state",
+        ),
+        CheckConstraint(
+            "requested_count BETWEEN 1 AND 10 AND difficulty IN ('easy', 'medium', 'hard', 'mixed')"
+            " AND scope = 'class_only' AND request_fingerprint ~ '^[0-9a-f]{64}$'"
+            " AND cardinality(requested_topic_ids) BETWEEN 1 AND 5"
+            " AND array_position(requested_topic_ids, NULL) IS NULL",
+            name="request",
+        ),
+        UniqueConstraint("user_id", "idempotency_key"),
+        UniqueConstraint("id", "user_id", "course_id"),
+        Index("quiz_sessions_one_generating_idx", "user_id", unique=True, postgresql_where=text("status = 'generating'")),
+        Index("quiz_sessions_lease_idx", "lease_expires_at", postgresql_where=text("status = 'generating'")),
+        Index(None, "user_id", "course_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    idempotency_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_topic_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False)
+    requested_count: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    difficulty: Mapped[str] = mapped_column(String(20), nullable=False)
+    scope: Mapped[str] = mapped_column(String(30), nullable=False)
+    protocol: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    service: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    attempt_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class QuizGenerationQuota(Base):
+    """Generations reserved per user and UTC day (atomic upsert before any upstream request)."""
+
+    __tablename__ = "quiz_generation_quotas"
+    __table_args__ = (CheckConstraint("used >= 0", name="used"),)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    quota_day: Mapped[date] = mapped_column(Date, primary_key=True)
+    used: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class Question(Base):
+    """A question. Revision 0006 added CHECKs, the generation columns and the composite keys.
+
+    A generated question (generated_by_session_id set, status 'generated') carries complete
+    metadata (questions_generated_check) and is immutable (database trigger); legacy and
+    non-generated questions (future M9 drafts) keep their old freedom.
+    """
+
     __tablename__ = "questions"
+    __table_args__ = (
+        CheckConstraint("purpose IN ('practice', 'exam')", name="purpose"),
+        CheckConstraint("qtype IN ('mcq', 'true_false', 'short')", name="qtype"),
+        CheckConstraint("difficulty IN ('easy', 'medium', 'hard')", name="difficulty"),
+        CheckConstraint("status IN ('draft', 'approved', 'generated', 'retired')", name="status"),
+        CheckConstraint(
+            "(generated_by_session_id IS NULL AND generated_for_user_id IS NULL AND status <> 'generated'"
+            " AND generation IS NULL)"
+            " OR ((generated_by_session_id IS NOT NULL AND generated_for_user_id IS NOT NULL AND status = 'generated'"
+            " AND purpose = 'practice' AND qtype IN ('mcq', 'true_false') AND topic_id IS NOT NULL"
+            " AND hint IS NOT NULL AND explanation IS NOT NULL AND grading_method = 'choice_id/1'"
+            " AND content_hash IS NOT NULL AND content_hash ~ '^[0-9a-f]{64}$'"
+            " AND generation IS NOT NULL AND jsonb_typeof(generation) = 'object'"
+            " AND answer_key IS NOT NULL AND jsonb_typeof(answer_key) = 'object'"
+            " AND jsonb_typeof(answer_key -> 'choice_id') = 'string'"
+            " AND (answer_key ->> 'choice_id') ~ '^[a-z0-9_-]{1,16}$'"
+            " AND (answer_key - 'choice_id') = '{}'::jsonb"
+            " AND choices IS NOT NULL AND jsonb_typeof(choices) = 'array' AND jsonb_array_length(choices) BETWEEN 2 AND 6"
+            " AND choices @> jsonb_build_array(jsonb_build_object('id', answer_key ->> 'choice_id'))"
+            " AND citations IS NOT NULL AND jsonb_typeof(citations) = 'array'"
+            " AND jsonb_array_length(citations) BETWEEN 1 AND 4) IS TRUE)",
+            name="generated",
+        ),
+        UniqueConstraint("id", "course_id"),
+        UniqueConstraint("id", "course_id", "purpose"),
+        UniqueConstraint(
+            "id", "generated_by_session_id", "generated_for_user_id", "topic_id",
+            name="questions_generated_assignment_key",
+        ),  # fmt: skip
+        ForeignKeyConstraint(
+            ["topic_id", "course_id"], ["topics.id", "topics.course_id"], name="questions_topic_course_fkey"
+        ),
+        ForeignKeyConstraint(
+            ["generated_by_session_id", "generated_for_user_id", "course_id"],
+            ["quiz_sessions.id", "quiz_sessions.user_id", "quiz_sessions.course_id"],
+            name="questions_generated_session_fkey",
+        ),
+        Index(None, "course_id", "purpose", "status"),
+    )
 
     id: Mapped[uuid.UUID] = pk()
     course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"))
     topic_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("topics.id"), nullable=True)
     purpose: Mapped[str] = mapped_column(String(20), default="practice")  # practice | exam
-    qtype: Mapped[str] = mapped_column(String(20), default="mcq")
+    qtype: Mapped[str] = mapped_column(String(20), default="mcq")  # mcq | true_false | short
     difficulty: Mapped[str] = mapped_column(String(20), default="medium")
     text: Mapped[str] = mapped_column(Text)
-    choices: Mapped[dict] = mapped_column(JSONB, nullable=True)
-    answer: Mapped[str] = mapped_column(Text, nullable=True)
+    choices: Mapped[dict] = mapped_column(JSONB, nullable=True)  # generated: [{"id", "text"}] in delivery order
+    answer: Mapped[str] = mapped_column(Text, nullable=True)  # legacy free text; generated questions use answer_key
     explanation: Mapped[str] = mapped_column(Text, nullable=True)
-    citations: Mapped[dict] = mapped_column(JSONB, nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="draft")  # draft | approved
+    citations: Mapped[dict] = mapped_column(JSONB, nullable=True)  # generated: verified evidence snapshots
+    status: Mapped[str] = mapped_column(String(20), default="draft")  # draft | approved | generated | retired
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # --- added by revision 0006 (M7; NULL for every legacy row) ---
+    hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answer_key: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # {"choice_id": "..."}; never delivered
+    grading_method: Mapped[str | None] = mapped_column(String(30), nullable=True)  # choice_id/1
+    generated_by_session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    generated_for_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    generation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # protocol, service, model, request_id
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class QuizItem(Base):
+    """A generated question assigned to its own session and student at one position (M7)."""
+
+    __tablename__ = "quiz_items"
+    __table_args__ = (
+        CheckConstraint("purpose = 'practice'", name="purpose"),
+        CheckConstraint("position BETWEEN 1 AND 10", name="position"),
+        ForeignKeyConstraint(
+            ["session_id", "user_id", "course_id"],
+            ["quiz_sessions.id", "quiz_sessions.user_id", "quiz_sessions.course_id"],
+            name="quiz_items_session_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["question_id", "course_id", "purpose"],
+            ["questions.id", "questions.course_id", "questions.purpose"],
+            name="quiz_items_question_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["question_id", "session_id", "user_id", "topic_id"],
+            [
+                "questions.id",
+                "questions.generated_by_session_id",
+                "questions.generated_for_user_id",
+                "questions.topic_id",
+            ],
+            name="quiz_items_generated_question_fkey",
+        ),
+        ForeignKeyConstraint(["topic_id", "course_id"], ["topics.id", "topics.course_id"], name="quiz_items_topic_fkey"),
+        UniqueConstraint("session_id", "position"),
+        UniqueConstraint("question_id"),
+        UniqueConstraint(
+            "id", "user_id", "question_id", "topic_id", "course_id", name="quiz_items_attempt_target_key"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    course_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    question_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    topic_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    purpose: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'practice'::character varying")
+    )
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class Attempt(Base):
+    """An answer. Revision 0006 added course_id (backfilled) and the M7 grading columns.
+
+    An M7 attempt (quiz_item_id set) carries the complete grading snapshot, is unique per
+    assignment, checked against the answer key on insert and append-only (database trigger).
+    """
+
     __tablename__ = "attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "(quiz_item_id IS NULL AND answer IS NULL AND grading_method IS NULL AND feedback IS NULL"
+            " AND mastery_before IS NULL AND mastery_after IS NULL AND mastery_method IS NULL"
+            " AND stats_attempts IS NULL AND stats_correct IS NULL AND submitted_at IS NULL)"
+            " OR ((quiz_item_id IS NOT NULL AND topic_id IS NOT NULL AND answer IS NOT NULL"
+            " AND grading_method = 'choice_id/1' AND feedback IS NOT NULL AND jsonb_typeof(feedback) = 'object'"
+            " AND mastery_method = 'cumulative_accuracy/1' AND mastery_after IS NOT NULL"
+            " AND mastery_after BETWEEN 0 AND 1"
+            " AND (mastery_before IS NULL OR mastery_before BETWEEN 0 AND 1)"
+            " AND stats_attempts IS NOT NULL AND stats_correct IS NOT NULL"
+            " AND stats_attempts >= 1 AND stats_correct BETWEEN 0 AND stats_attempts"
+            " AND submitted_at IS NOT NULL AND hint_count BETWEEN 0 AND 1"
+            " AND (response_ms IS NULL OR response_ms BETWEEN 0 AND 3600000)) IS TRUE)",
+            name="practice",
+        ),
+        ForeignKeyConstraint(
+            ["question_id", "course_id"], ["questions.id", "questions.course_id"], name="attempts_question_course_fkey"
+        ),
+        ForeignKeyConstraint(["topic_id", "course_id"], ["topics.id", "topics.course_id"], name="attempts_topic_course_fkey"),
+        ForeignKeyConstraint(
+            ["quiz_item_id", "user_id", "question_id", "topic_id", "course_id"],
+            ["quiz_items.id", "quiz_items.user_id", "quiz_items.question_id", "quiz_items.topic_id", "quiz_items.course_id"],
+            name="attempts_quiz_item_fkey",
+        ),
+        UniqueConstraint("quiz_item_id"),
+        Index(None, "user_id", "course_id", "submitted_at"),
+        Index(None, "course_id", "topic_id", "submitted_at"),
+    )
 
     id: Mapped[uuid.UUID] = pk()
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     question_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("questions.id"))
     topic_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("topics.id"), nullable=True)
     is_correct: Mapped[bool] = mapped_column(Boolean)
-    hint_count: Mapped[int] = mapped_column(Integer, default=0)
-    response_ms: Mapped[int] = mapped_column(Integer, nullable=True)
+    hint_count: Mapped[int] = mapped_column(Integer, default=0)  # client telemetry, untrusted
+    response_ms: Mapped[int] = mapped_column(Integer, nullable=True)  # client telemetry, untrusted
     attempted_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # --- added by revision 0006 (M7) ---
+    course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"), nullable=False)
+    quiz_item_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    answer: Mapped[str | None] = mapped_column(String(16), nullable=True)  # the choice id submitted
+    grading_method: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    feedback: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # immutable grading snapshot
+    mastery_before: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mastery_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mastery_method: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    stats_attempts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stats_correct: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TopicPracticeStat(Base):
+    """Deterministic baseline counters of committed M7 attempts per (user, topic). Not AI mastery."""
+
+    __tablename__ = "topic_practice_stats"
+    __table_args__ = (
+        CheckConstraint("attempts >= 0 AND correct >= 0 AND correct <= attempts", name="counters"),
+        ForeignKeyConstraint(
+            ["topic_id", "course_id"], ["topics.id", "topics.course_id"], name="topic_practice_stats_topic_fkey"
+        ),
+        Index(None, "course_id", "topic_id"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    topic_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    correct: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class MasteryScore(Base):
+    """Reserved for the real AI-2 mastery model (M8). M7 never writes here (docs/ai-mastery-integration.md)."""
+
     __tablename__ = "mastery_scores"
     __table_args__ = (UniqueConstraint("user_id", "topic_id"),)
 
