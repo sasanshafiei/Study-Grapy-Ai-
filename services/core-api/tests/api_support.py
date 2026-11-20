@@ -88,6 +88,47 @@ DOCUMENT_ITEM_KEYS = {
 }  # fmt: skip
 
 
+QUIZ_GUARDS = (
+    ("attempts", "attempts_guard"), ("quiz_items", "quiz_items_guard"),
+    ("quiz_sessions", "quiz_sessions_guard"), ("questions", "questions_guard"),
+)  # fmt: skip
+
+
+def remove_quiz_state(connection, users: list, courses: list) -> None:
+    """Delete M7 rows (and practice rows) of these users and courses, inside the caller's transaction.
+
+    Graded attempts, assignments, sessions and generated questions are protected
+    by triggers; like an operator, the test removes them as the table owner with
+    those triggers disabled for this transaction only (ALTER TABLE is transactional).
+    """
+    if connection.execute(text("SELECT to_regclass('public.quiz_sessions') IS NULL")).scalar_one():
+        return
+    ids = {"u": list(users), "c": list(courses)}
+    needed = connection.execute(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM quiz_sessions WHERE user_id = ANY(:u) OR course_id = ANY(:c)) "
+            "OR EXISTS (SELECT 1 FROM attempts WHERE user_id = ANY(:u) OR course_id = ANY(:c)) "
+            "OR EXISTS (SELECT 1 FROM questions WHERE course_id = ANY(:c)) "
+            "OR EXISTS (SELECT 1 FROM quiz_generation_quotas WHERE user_id = ANY(:u)) "
+            "OR EXISTS (SELECT 1 FROM topic_practice_stats WHERE user_id = ANY(:u) OR course_id = ANY(:c))"
+        ),
+        ids,
+    ).scalar_one()
+    if not needed:
+        return
+    for table, trigger in QUIZ_GUARDS:
+        connection.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}"))
+    connection.execute(text("DELETE FROM attempts WHERE user_id = ANY(:u) OR course_id = ANY(:c)"), ids)
+    connection.execute(text("DELETE FROM topic_practice_stats WHERE user_id = ANY(:u) OR course_id = ANY(:c)"), ids)
+    connection.execute(text("DELETE FROM mastery_scores WHERE user_id = ANY(:u)"), ids)
+    connection.execute(text("DELETE FROM quiz_generation_quotas WHERE user_id = ANY(:u)"), ids)
+    connection.execute(text("DELETE FROM quiz_items WHERE user_id = ANY(:u) OR course_id = ANY(:c)"), ids)
+    connection.execute(text("DELETE FROM questions WHERE course_id = ANY(:c) OR generated_for_user_id = ANY(:u)"), ids)
+    connection.execute(text("DELETE FROM quiz_sessions WHERE user_id = ANY(:u) OR course_id = ANY(:c)"), ids)
+    for table, trigger in QUIZ_GUARDS:
+        connection.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}"))
+
+
 @dataclass
 class World:
     engine: Engine
@@ -191,6 +232,7 @@ class World:
 
     def cleanup(self) -> None:
         with self.engine.begin() as connection:
+            remove_quiz_state(connection, self.users, self.courses)
             # M5: chunks, their topic links and topics of this test's courses and documents.
             doc_filter = "document_id IN (SELECT id FROM documents WHERE course_id = ANY(:c) OR id = ANY(:d))"
             ids = {"c": self.courses, "d": self.documents}

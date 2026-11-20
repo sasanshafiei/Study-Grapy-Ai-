@@ -157,6 +157,10 @@ def test_no_endpoint_exposes_parsed_content():
         "/api/v1/courses/join": ["post"],
         "/api/v1/courses/{course_id}/topics": ["get"],
         "/api/v1/courses/{course_id}/chat": ["post"],
+        # M7: quizzes and attempts; their citation snippets, too, come only from verified chunks.
+        "/api/v1/courses/{course_id}/quizzes": ["post"],
+        "/api/v1/courses/{course_id}/quizzes/{quiz_id}": ["get"],
+        "/api/v1/courses/{course_id}/attempts": ["post"],
         "/health": ["get"],
         "/health/db": ["get"],
     }
