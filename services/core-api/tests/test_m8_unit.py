@@ -92,8 +92,12 @@ def test_schema_checks_are_verbatim_copies_of_the_migration():
     source = MIGRATION.read_text()
     namespace: dict = {}
     exec(compile(source.split("UPGRADE_PREFLIGHT = ")[0], str(MIGRATION), "exec"), namespace)  # constants only
+    # Revision 0008 (M9) appended its own constants; they are checked against migration 0008 (test_migration_0008, MIG-04).
+    m9_start = Path(schema_checks.__file__).read_text().index("# --- Revision 0008 (M9")
+    m9_names = {n for n in dir(schema_checks) if n.isupper() and Path(schema_checks.__file__).read_text().find(f"\n{n} = ") > m9_start}
+    assert m9_names and "QUESTION_BANK_CHECK" in m9_names and "STREAM_STATE_CHECK" not in m9_names
     for name in dir(schema_checks):
-        if name.isupper():
+        if name.isupper() and name not in m9_names:
             assert namespace[name] == getattr(schema_checks, name), name
 
 
@@ -460,7 +464,7 @@ def test_the_mastery_queue_needs_a_dedicated_worker_and_its_own_checks():
     enabled = settings(mastery_delivery_enabled=True)
     with pytest.raises(runtime.PreflightError, match="AI_SERVICE_TOKEN"):
         runtime.mastery_worker_preflight(enabled, {**base, "AI_SERVICE_URL": "http://ai-service:8000"})
-    assert runtime.REQUIRED_SCHEMA_REVISION == "0007"
+    assert runtime.REQUIRED_SCHEMA_REVISION == "0008"
 
 
 def test_m8_task_failures_are_logged_without_parameters(caplog):

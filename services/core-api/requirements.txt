@@ -28,3 +28,14 @@ python-multipart==0.0.34
 # PDF text extraction (M3). Pure Python, BSD-3-Clause, no runtime dependencies on 3.11.
 # Runs only inside the resource-limited extractor subprocess (app/ingestion/extract_child.py).
 pypdf==7.1.1
+# Exam export (M9, docs/exam-export.md). Used only inside the resource-limited renderer subprocess
+# (app/exams/render_child.py). Exact pins checked with pip check and pip-audit (no known advisories)
+# on 2026-11-21. ReportLab: BSD (PDF); python-docx: MIT (DOCX).
+reportlab==5.1.0
+python-docx==1.2.0
+# Their runtime dependencies, pinned to the releases resolved with them: Pillow (MIT-CMU/HPND,
+# required by ReportLab), charset-normalizer (MIT, required by ReportLab), lxml (BSD-3-Clause,
+# required by python-docx). typing_extensions is already part of the resolved set.
+pillow==13.0.0
+charset-normalizer==3.5.2
+lxml==6.1.3
