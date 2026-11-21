@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from uuid import uuid4
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.orm import sessionmaker
 
 from app.harvest import budget, maintenance, runs
@@ -257,6 +260,78 @@ def test_history_cleanup_is_bounded_and_keeps_recent_runs(env):
     assert runs.cleanup_history(factory, settings) == 1
     assert runs.cleanup_history(factory, settings) == 0
     assert world.scalar("SELECT count(*) FROM harvest_runs WHERE course_id = :c", c=course) == 1
+
+
+def _insert_finished_run(world, course, source, run_id, status, finished_at):
+    world.execute(
+        "INSERT INTO harvest_runs (id, course_id, source_id, trigger, generation, max_claims, max_failures, "
+        "status, finished_at) VALUES (:id, :c, :s, 'manual', 0, 1, 1, :status, :finished_at)",
+        id=run_id, c=course, s=source, status=status, finished_at=finished_at,
+    )
+
+
+def _remaining_run_ids(world, source):
+    return {row["id"] for row in world.rows("SELECT id FROM harvest_runs WHERE source_id = :s", s=source)}
+
+
+def test_history_cleanup_deletes_only_the_ordered_batch(env):
+    world, course, source, factory, _ = env
+    settings = harvest_settings(harvest_history_retention_days=30, harvest_history_cleanup_batch=2)
+    now = world.scalar("SELECT now()")
+    lower, higher, oldest = sorted(uuid4() for _ in range(3))
+    recent = uuid4()
+    _insert_finished_run(world, course, source, oldest, "failed", now - timedelta(days=50))
+    # One-row statistics can produce a nested-loop rescan of the old locking subquery.
+    world.execute("ANALYZE harvest_runs")
+    tied = now - timedelta(days=40)
+    _insert_finished_run(world, course, source, higher, "cancelled", tied)
+    _insert_finished_run(world, course, source, lower, "succeeded", tied)
+    _insert_finished_run(world, course, source, recent, "succeeded", now - timedelta(days=1))
+
+    with factory() as session:
+        queued = runs.create_run(session, settings, course, source, manual=True)
+        session.commit()
+    other_course = world.course(world.user("professor"))
+    opt_in(world, other_course, source)
+    running = claimed_run(factory, settings, other_course, source).run_id
+    protected = {queued, running, recent}
+
+    assert runs.cleanup_history(factory, settings) == 2
+    assert _remaining_run_ids(world, source) == protected | {higher}
+    assert runs.cleanup_history(factory, settings) == 1
+    assert _remaining_run_ids(world, source) == protected
+    assert runs.cleanup_history(factory, settings) == 0
+    assert _remaining_run_ids(world, source) == protected
+
+
+def test_concurrent_history_cleanup_skips_uncommitted_victims(env):
+    world, course, source, factory, _ = env
+    settings = harvest_settings(harvest_history_retention_days=30, harvest_history_cleanup_batch=2)
+    finished_at = world.scalar("SELECT now() - interval '40 days'")
+    ids = sorted(uuid4() for _ in range(5))
+    for run_id in ids:
+        _insert_finished_run(world, course, source, run_id, "succeeded", finished_at)
+
+    first_factory = sessionmaker(bind=world.engine)
+    deleted = threading.Event()
+    release = threading.Event()
+
+    @event.listens_for(first_factory, "before_commit")
+    def hold_first_batch(session):
+        deleted.set()  # The DELETE ran, and this transaction still holds the row locks.
+        assert release.wait(timeout=10), "second cleanup did not finish while the first held its locks"
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(runs.cleanup_history, first_factory, settings)
+        try:
+            assert deleted.wait(timeout=10)
+            assert runs.cleanup_history(factory, settings) == 2
+            # A third connection sees only the second worker's committed deletions.
+            assert _remaining_run_ids(world, source) == {ids[0], ids[1], ids[4]}
+        finally:
+            release.set()
+        assert first.result() == 2
+    assert _remaining_run_ids(world, source) == {ids[4]}
 
 
 class _Publisher:
