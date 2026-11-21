@@ -94,6 +94,32 @@ QUIZ_GUARDS = (
 )  # fmt: skip
 
 
+def remove_m8_state(connection, users: list, courses: list) -> None:
+    """Delete M8 rows (revision 0007) of these users and courses, before the M7 rows they reference.
+
+    Outbox rows reference attempts, so they go first; the global model state is reset to
+    'unknown' so that no test inherits another test's probe outcome.
+    """
+    if connection.execute(text("SELECT to_regclass('public.mastery_outbox') IS NULL")).scalar_one():
+        return
+    ids = {"u": list(users), "c": list(courses)}
+    connection.execute(text("DELETE FROM study_events WHERE user_id = ANY(:u) OR course_id = ANY(:c)"), ids)
+    connection.execute(text("DELETE FROM analytics_weekly_releases WHERE course_id = ANY(:c)"), ids)
+    connection.execute(text("DELETE FROM mastery_outbox WHERE user_id = ANY(:u) OR course_id = ANY(:c)"), ids)
+    connection.execute(text("DELETE FROM mastery_scores WHERE user_id = ANY(:u) OR course_id = ANY(:c)"), ids)
+    connection.execute(
+        text("DELETE FROM mastery_streams WHERE user_id = ANY(:u) OR course_id = ANY(:c) OR last_operator_actor_id = ANY(:u)"),
+        ids,
+    )
+    connection.execute(
+        text(
+            "UPDATE mastery_model_state SET status = 'unknown', reason = NULL, protocol = NULL, service = NULL, "
+            "model_name = NULL, model_version = NULL, state_epoch = NULL, pseudonym_key_id = NULL, "
+            "probe_started_at = NULL, probed_at = NULL WHERE id = 1 AND status <> 'unknown'"
+        )
+    )
+
+
 def remove_quiz_state(connection, users: list, courses: list) -> None:
     """Delete M7 rows (and practice rows) of these users and courses, inside the caller's transaction.
 
@@ -104,6 +130,7 @@ def remove_quiz_state(connection, users: list, courses: list) -> None:
     if connection.execute(text("SELECT to_regclass('public.quiz_sessions') IS NULL")).scalar_one():
         return
     ids = {"u": list(users), "c": list(courses)}
+    remove_m8_state(connection, users, courses)
     needed = connection.execute(
         text(
             "SELECT EXISTS (SELECT 1 FROM quiz_sessions WHERE user_id = ANY(:u) OR course_id = ANY(:c)) "
@@ -121,6 +148,8 @@ def remove_quiz_state(connection, users: list, courses: list) -> None:
     connection.execute(text("DELETE FROM attempts WHERE user_id = ANY(:u) OR course_id = ANY(:c)"), ids)
     connection.execute(text("DELETE FROM topic_practice_stats WHERE user_id = ANY(:u) OR course_id = ANY(:c)"), ids)
     connection.execute(text("DELETE FROM mastery_scores WHERE user_id = ANY(:u)"), ids)
+    if connection.execute(text("SELECT to_regclass('public.mastery_outbox') IS NOT NULL")).scalar_one():
+        connection.execute(text("DELETE FROM mastery_scores WHERE course_id = ANY(:c)"), ids)
     connection.execute(text("DELETE FROM quiz_generation_quotas WHERE user_id = ANY(:u)"), ids)
     connection.execute(text("DELETE FROM quiz_items WHERE user_id = ANY(:u) OR course_id = ANY(:c)"), ids)
     connection.execute(text("DELETE FROM questions WHERE course_id = ANY(:c) OR generated_for_user_id = ANY(:u)"), ids)

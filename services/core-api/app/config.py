@@ -244,6 +244,71 @@ class Settings(BaseSettings):
     quiz_max_response_bytes: int = Field(default=256 * 1024, ge=4096, le=4 * MIB)
     quiz_capabilities_cache_seconds: float = Field(default=30.0, ge=0, le=300)
 
+    # --- dashboard, analytics, study events, mastery delivery (M8, docs/dashboard-api.md) ------
+    # Deterministic, read-only student dashboard (no AI involved): on by default.
+    dashboard_enabled: bool = True
+    # Professor analytics: OFF until the privacy review approves it (docs/analytics-privacy.md).
+    # While off the endpoint answers 503 after authorization and no release is generated.
+    analytics_enabled: bool = False
+    # Minimum distinct contributing students per released cell. Never below 5.
+    analytics_min_group_size: int = Field(default=5, ge=5, le=100)
+    # A completed UTC ISO week is released no earlier than this long after it ended (late commits).
+    analytics_publication_delay_seconds: int = Field(default=6 * 3600, ge=3600, le=7 * 86400)
+    # Completed weeks shown (and released) per course, and releases generated per maintenance tick.
+    analytics_weeks: int = Field(default=12, ge=1, le=26)
+    analytics_release_batch_size: int = Field(default=50, ge=1, le=1000)
+    analytics_maintenance_interval_seconds: float = Field(default=900, gt=0)
+    # Client-reported study telemetry: off until approved (docs/study-events.md).
+    study_events_enabled: bool = False
+    study_events_max_body_bytes: int = Field(default=16 * 1024, ge=1024, le=256 * 1024)
+    study_events_body_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    study_events_max_batch: int = Field(default=25, ge=1, le=100)
+    # Database-backed, per student and UTC day, across every API process.
+    study_events_daily_quota: int = Field(default=2000, ge=1, le=100_000)
+    study_events_max_interval_seconds: int = Field(default=1800, ge=60, le=3600)
+    study_events_future_skew_seconds: int = Field(default=120, ge=0, le=600)
+    # Events older than this are deleted by maintenance. At least 2 days: longer than the
+    # 24-hour acceptance window, so an acceptable replay always finds its original.
+    study_events_retention_days: int = Field(default=180, ge=2, le=3650)
+    study_events_cleanup_batch: int = Field(default=1000, ge=1, le=100_000)
+    # Proposed AI recommendation ranking (docs/ai-recommendations-contract.md): not implemented in M8.
+    ai_recommendations_enabled: bool = False
+    # Delivery of graded attempts to the AI-2 mastery model. Outbox rows are written whatever
+    # this says; while off nothing is dispatched, claimed or sent (lease recovery still runs).
+    mastery_delivery_enabled: bool = False
+    mastery_queue: str = Field(default="mastery.deliver", pattern=QUEUE_NAME_PATTERN)
+    # The approved model, pinned. A capability probe or response that differs blocks delivery.
+    mastery_model_name: str | None = None
+    mastery_model_version: str | None = None
+    mastery_state_epoch: str | None = None  # a UUID agreed with AI-2
+    # Pseudonyms: HMAC-SHA256(key, namespace | user | course). The namespace separates deployments;
+    # the key is required while delivery is enabled and is never logged.
+    mastery_pseudonym_namespace: str | None = None
+    mastery_pseudonym_key: SecretStr | None = None
+    mastery_max_batch_events: int = Field(default=100, ge=1, le=500)
+    mastery_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    mastery_read_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    mastery_probe_deadline_seconds: float = Field(default=5.0, gt=0, le=60)
+    mastery_update_deadline_seconds: float = Field(default=20.0, gt=0, le=300)
+    mastery_max_request_bytes: int = Field(default=256 * 1024, ge=4096, le=4 * MIB)
+    mastery_max_response_bytes: int = Field(default=64 * 1024, ge=1024, le=MIB)
+    mastery_capabilities_cache_seconds: float = Field(default=30.0, ge=0, le=300)
+    mastery_task_soft_time_limit_seconds: int = Field(default=60, ge=10)
+    mastery_task_time_limit_seconds: int = Field(default=75, ge=11)
+    # Delivery failures of one batch before the stream is blocked (terminal until an operator retries).
+    mastery_max_failures: int = Field(default=10, ge=1, le=100)
+    # Claims of one batch (failures, pauses, unconfirmed-model releases) before it is blocked.
+    mastery_max_batch_claims: int = Field(default=50, ge=1, le=1000)
+    mastery_backoff_base_seconds: int = Field(default=30, ge=1, le=3600)
+    mastery_backoff_max_seconds: int = Field(default=3600, ge=1, le=86400)
+    mastery_dispatch_batch_size: int = Field(default=50, ge=1, le=1000)
+    mastery_redispatch_after_seconds: int = Field(default=300, ge=1)
+    mastery_maintenance_interval_seconds: float = Field(default=30, gt=0)
+    mastery_dispatch_max_queue_depth: int = Field(default=200, ge=1)
+    # Predictions older than this are not shown, and a review time is shown only for a fresh,
+    # current prediction that covers every committed attempt of the topic.
+    mastery_prediction_max_age_days: int = Field(default=30, ge=1, le=365)
+
     @model_validator(mode="after")
     def _ordered_limits(self) -> "Settings":
         """parse timeout < soft limit < hard limit (< lease), visibility timeout above both."""
@@ -310,7 +375,32 @@ class Settings(BaseSettings):
             raise ValueError(
                 "QUIZ_PROBE_DEADLINE_SECONDS + QUIZ_GENERATE_DEADLINE_SECONDS < QUIZ_PIPELINE_DEADLINE_SECONDS is required"
             )
+        if self.mastery_queue in (self.parse_queue, self.maintenance_queue, self.index_queue, self.harvest_queue):
+            raise ValueError("MASTERY_QUEUE must differ from every other queue")
+        if not (
+            self.mastery_probe_deadline_seconds + self.mastery_update_deadline_seconds
+            < self.mastery_task_soft_time_limit_seconds
+            < self.mastery_task_time_limit_seconds
+        ):
+            raise ValueError(
+                "MASTERY_PROBE_DEADLINE_SECONDS + MASTERY_UPDATE_DEADLINE_SECONDS "
+                "< MASTERY_TASK_SOFT_TIME_LIMIT_SECONDS < MASTERY_TASK_TIME_LIMIT_SECONDS is required"
+            )
+        if self.broker_visibility_timeout_seconds <= 2 * self.mastery_task_time_limit_seconds:
+            raise ValueError("BROKER_VISIBILITY_TIMEOUT_SECONDS must exceed twice MASTERY_TASK_TIME_LIMIT_SECONDS")
+        if self.mastery_backoff_max_seconds < self.mastery_backoff_base_seconds:
+            raise ValueError("MASTERY_BACKOFF_MAX_SECONDS must not be below MASTERY_BACKOFF_BASE_SECONDS")
+        if self.ai_recommendations_enabled:
+            raise ValueError("AI_RECOMMENDATIONS_ENABLED cannot be true: no AI recommendation integration exists in M8")
+        from .mastery.pins import validate_pins  # local: dependency-free
+
+        validate_pins(self)  # raises ValueError for malformed pins (and missing ones while delivery is enabled)
         return self
+
+    @property
+    def mastery_lease_seconds(self) -> int:
+        """Lease of a claimed mastery batch: the task's hard limit plus the shared margin (database time)."""
+        return self.mastery_task_time_limit_seconds + self.job_lease_margin_seconds
 
     @property
     def quiz_lease_seconds(self) -> int:

@@ -8,9 +8,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.celery_app import (
+    ANALYTICS_MAINTAIN_TASK,
     DISPATCH_TASK,
     HARVEST_MAINTAIN_TASK,
     HARVEST_TASK,
+    MASTERY_MAINTAIN_TASK,
+    MASTERY_TASK,
     MAINTENANCE_TASKS,
     PARSE_TASK,
     RECONCILE_TASK,
@@ -51,9 +54,14 @@ def test_routes_and_beat_schedule(settings):
     for name in MAINTENANCE_TASKS:
         assert conf.task_routes[name] == {"queue": "q.maint"}
     schedule = {entry["task"]: entry for entry in conf.beat_schedule.values()}
-    assert set(schedule) == {DISPATCH_TASK, RECOVER_TASK, RECONCILE_TASK, HARVEST_MAINTAIN_TASK}
+    assert set(schedule) == {
+        DISPATCH_TASK, RECOVER_TASK, RECONCILE_TASK, HARVEST_MAINTAIN_TASK, MASTERY_MAINTAIN_TASK,
+        ANALYTICS_MAINTAIN_TASK,
+    }  # fmt: skip
     assert conf.task_routes[HARVEST_TASK] == {"queue": settings.harvest_queue}
     assert HARVEST_TASK not in schedule
+    assert conf.task_routes[MASTERY_TASK] == {"queue": settings.mastery_queue}
+    assert MASTERY_TASK not in schedule
     for entry in schedule.values():
         assert entry["options"]["queue"] == "q.maint"
         assert entry["options"]["expires"] == entry["schedule"]  # no replay of a missed backlog

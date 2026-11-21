@@ -39,6 +39,22 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
+from .schema_checks import (  # shared verbatim with migration 0007
+    MODEL_STATE_CHECK,
+    OUTBOX_LIFECYCLE_CHECK,
+    OUTBOX_STATUS_CHECK,
+    RELEASE_PAYLOAD_CHECK,
+    RELEASE_WEEK_CHECK,
+    SCORE_PROVENANCE_CHECK,
+    STREAM_BATCH_CHECK,
+    STREAM_COUNTERS_CHECK,
+    STREAM_ERROR_CHECK,
+    STREAM_LEASE_CHECK,
+    STREAM_STATE_CHECK,
+    STUDY_EVENT_SHAPE_CHECK,
+    STUDY_EVENT_TIME_CHECK,
+    STUDY_EVENT_TYPE_CHECK,
+)
 
 EMBED_DIM = 384
 
@@ -192,6 +208,8 @@ class Document(Base):
         ),
         # Target of external_resources.current_document_id: that document must belong to the same resource.
         UniqueConstraint("id", "external_resource_id", name="documents_id_external_resource_id_key"),
+        # M8 (revision 0007): target of study_events' course-consistent document key.
+        UniqueConstraint("id", "course_id"),
         # At most one indexed and one pending version per external resource. A
         # replacement switches old indexed -> stale first, then new -> indexed.
         Index(
@@ -913,6 +931,16 @@ class Attempt(Base):
         UniqueConstraint("quiz_item_id"),
         Index(None, "user_id", "course_id", "submitted_at"),
         Index(None, "course_id", "topic_id", "submitted_at"),
+        # --- revision 0007 (M8) ---
+        # Target of mastery_outbox's composite key: an event names its attempt's own sequence number.
+        UniqueConstraint("id", "user_id", "course_id", "topic_id", "stats_attempts", name="attempts_mastery_event_key"),
+        # The per-topic sequence of graded attempts never repeats (the trigger also forbids gaps).
+        Index(
+            "attempts_topic_sequence_idx", "user_id", "topic_id", "stats_attempts", unique=True,
+            postgresql_where=text("quiz_item_id IS NOT NULL"),
+        ),  # fmt: skip
+        Index("attempts_graded_course_submitted_idx", "course_id", "submitted_at",
+              postgresql_where=text("quiz_item_id IS NOT NULL")),  # fmt: skip
     )
 
     id: Mapped[uuid.UUID] = pk()
@@ -959,15 +987,207 @@ class TopicPracticeStat(Base):
 
 
 class MasteryScore(Base):
-    """Reserved for the real AI-2 mastery model (M8). M7 never writes here (docs/ai-mastery-integration.md)."""
+    """One model prediction per (student, topic), written only by core-api from a validated AI-2 response (M8).
+
+    Revision 0007 added course_id, the composite topic key and complete provenance. A legacy
+    row (every provenance column NULL) is preserved but never shown as model output; an M8
+    row carries the protocol, model, version, state epoch, pseudonym key id, the topic
+    sequence it covers (through_seq == attempts_seen == attempts), the batch and the time it
+    was received, and mastery in [0, 1] (docs/ai-mastery-integration.md).
+    """
 
     __tablename__ = "mastery_scores"
-    __table_args__ = (UniqueConstraint("user_id", "topic_id"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "topic_id"),
+        ForeignKeyConstraint(
+            ["topic_id", "course_id"], ["topics.id", "topics.course_id"], name="mastery_scores_topic_course_fkey"
+        ),
+        CheckConstraint(SCORE_PROVENANCE_CHECK, name="provenance"),
+    )
 
     id: Mapped[uuid.UUID] = pk()
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     topic_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("topics.id"))
     mastery: Mapped[float] = mapped_column(Float, default=0.0)  # output of the Model 2 classifier
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    next_review_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    next_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    # --- added by revision 0007 (M8) ---
+    course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"), nullable=False)
+    protocol: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    model_epoch: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    pseudonym_key_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    through_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    attempts_seen: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --- Revision 0007 (M8): mastery delivery, study telemetry, analytics releases -------------
+#
+# Lock order of every transaction that takes more than one of these rows (app/mastery/):
+#   users -> courses -> enrollments -> mastery_model_state -> mastery_streams -> mastery_outbox
+#   -> mastery_scores
+# A graded attempt (M7) only INSERTs new outbox rows and inserts its stream row ON CONFLICT DO
+# NOTHING; it never waits for an existing stream or outbox row lock, and the delivery transactions
+# lock streams FOR NO KEY UPDATE, which does not block the outbox key's KEY SHARE check.
+
+class MasteryStream(Base):
+    """Delivery state of one student's mastery events in one course: at most one active batch."""
+
+    __tablename__ = "mastery_streams"
+    __table_args__ = (
+        CheckConstraint(STREAM_STATE_CHECK, name="state"),
+        CheckConstraint(STREAM_BATCH_CHECK, name="batch"),
+        CheckConstraint(STREAM_LEASE_CHECK, name="lease"),
+        CheckConstraint(STREAM_ERROR_CHECK, name="error"),
+        CheckConstraint(STREAM_COUNTERS_CHECK, name="counters"),
+        Index(None, "state", "next_attempt_at"),
+        Index(None, "course_id"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"), primary_key=True)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'ready'::character varying"))
+    # The active batch: immutable identity (also the request id) and membership (mastery_outbox.batch_id).
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    batch_epoch: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    batch_size: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    batch_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    batch_claims: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # Renewable claim (fencing token) and lease of the attempt delivering the batch now.
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dispatch_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    claim_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    last_error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    operator_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    last_operator_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_operator_actor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class MasteryOutbox(Base):
+    """One mastery event per graded M7 attempt, created by a trigger in the attempt's own transaction."""
+
+    __tablename__ = "mastery_outbox"
+    __table_args__ = (
+        CheckConstraint("topic_seq >= 1", name="topic_seq"),
+        CheckConstraint("origin IN ('trigger', 'backfill')", name="origin"),
+        CheckConstraint(OUTBOX_STATUS_CHECK, name="status"),
+        CheckConstraint(OUTBOX_LIFECYCLE_CHECK, name="lifecycle"),
+        ForeignKeyConstraint(
+            ["event_id", "user_id", "course_id", "topic_id", "topic_seq"],
+            ["attempts.id", "attempts.user_id", "attempts.course_id", "attempts.topic_id", "attempts.stats_attempts"],
+            name="mastery_outbox_attempt_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["user_id", "course_id"],
+            ["mastery_streams.user_id", "mastery_streams.course_id"],
+            name="mastery_outbox_stream_fkey",
+        ),
+        ForeignKeyConstraint(["topic_id", "course_id"], ["topics.id", "topics.course_id"], name="mastery_outbox_topic_fkey"),
+        UniqueConstraint("user_id", "topic_id", "topic_seq"),
+        Index("mastery_outbox_pending_idx", "user_id", "course_id", "topic_seq", "topic_id",
+              postgresql_where=text("status = 'pending'")),  # fmt: skip
+        Index("mastery_outbox_batch_idx", "batch_id", postgresql_where=text("batch_id IS NOT NULL")),
+    )
+
+    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)  # the attempt id
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    course_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    topic_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    topic_seq: Mapped[int] = mapped_column(Integer, nullable=False)  # attempts.stats_attempts
+    origin: Mapped[str] = mapped_column(String(10), nullable=False)  # trigger | backfill
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'pending'::character varying"))
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)  # applied | duplicate
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    batched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MasteryModelState(Base):
+    """Outcome of the last capability probe against the pinned mastery model (single row)."""
+
+    __tablename__ = "mastery_model_state"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="single_row"),
+        CheckConstraint("status IN ('unknown', 'compatible', 'incompatible')", name="status"),
+        CheckConstraint(MODEL_STATE_CHECK, name="state"),
+    )
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, server_default=text("1"))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'unknown'::character varying"))
+    reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    protocol: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    service: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    state_epoch: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    pseudonym_key_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    probe_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    probed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class StudyEvent(Base):
+    """Client-reported study telemetry (allowlisted, bounded, untrusted; docs/study-events.md)."""
+
+    __tablename__ = "study_events"
+    __table_args__ = (
+        CheckConstraint(STUDY_EVENT_TYPE_CHECK, name="event_type"),
+        CheckConstraint(STUDY_EVENT_SHAPE_CHECK, name="shape"),
+        CheckConstraint(STUDY_EVENT_TIME_CHECK, name="time"),
+        CheckConstraint("fingerprint ~ '^[0-9a-f]{64}$'", name="fingerprint"),
+        ForeignKeyConstraint(["topic_id", "course_id"], ["topics.id", "topics.course_id"], name="study_events_topic_fkey"),
+        ForeignKeyConstraint(
+            ["document_id", "course_id"], ["documents.id", "documents.course_id"],
+            name="study_events_document_fkey", ondelete="CASCADE",
+        ),  # fmt: skip
+        UniqueConstraint("user_id", "client_event_id"),
+        Index(None, "user_id", "received_at"),
+        Index(None, "user_id", "course_id", "occurred_at"),
+        Index(None, "received_at"),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"), nullable=False)
+    client_event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    surface: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    topic_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    recommendation_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    recommendation_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class AnalyticsWeeklyRelease(Base):
+    """One immutable, privacy-filtered analytics release per course and completed UTC ISO week."""
+
+    __tablename__ = "analytics_weekly_releases"
+    __table_args__ = (
+        CheckConstraint(RELEASE_WEEK_CHECK, name="week"),
+        CheckConstraint(RELEASE_PAYLOAD_CHECK, name="payload"),
+    )
+
+    course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"), primary_key=True)
+    week_start: Mapped[date] = mapped_column(Date, primary_key=True)
+    policy: Mapped[str] = mapped_column(String(40), nullable=False)
+    min_group_size: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

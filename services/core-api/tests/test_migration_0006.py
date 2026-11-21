@@ -160,12 +160,25 @@ def _generated_question(connection, session, user, course, topic, **overrides):
 
 
 def _attempt(connection, chain, user, course, topic, **overrides):
+    """A graded attempt inserted directly. Without overrides it is the legitimate path, so, as the M7 grading code
+    does, it first advances the topic statistics and carries their counters (required since revision 0007, whose
+    sequence guard refuses a graded attempt that does not continue its topic's counters)."""
+    counters = {}
+    if not overrides:
+        stats = connection.execute(
+            text("INSERT INTO topic_practice_stats AS s (user_id, topic_id, course_id, attempts, correct) "
+                 "VALUES (:u, :t, :c, 1, 1) ON CONFLICT (user_id, topic_id) DO UPDATE SET attempts = s.attempts + 1, "
+                 "correct = s.correct + 1 RETURNING attempts, correct"),  # fmt: skip
+            {"u": user, "t": topic, "c": course},
+        ).one()
+        counters = {"stats_attempts": stats.attempts, "stats_correct": stats.correct,
+                    "mastery_after": stats.correct / stats.attempts}  # fmt: skip
     values = {
         "user_id": user, "question_id": chain["question"], "topic_id": topic, "course_id": course,
         "is_correct": True, "hint_count": 0, "response_ms": 100, "quiz_item_id": chain["item"], "answer": "a",
         "grading_method": "choice_id/1", "feedback": json.dumps({"x": 1}), "mastery_before": None,
         "mastery_after": 1.0, "mastery_method": "cumulative_accuracy/1", "stats_attempts": 1, "stats_correct": 1,
-        **overrides,
+        **counters, **overrides,
     }  # fmt: skip
     columns = ", ".join([*values, "submitted_at"])
     params = ", ".join([*(f"CAST(:{k} AS jsonb)" if k == "feedback" else f":{k}" for k in values), "now()"])
@@ -188,7 +201,7 @@ def test_downgrade_refuses_while_m7_state_exists(scratch6, disposable_engine, al
         _m7_chain(connection, student, course, topic)
     output = _failed(run_alembic("downgrade", PREVIOUS, env=alembic_env))
     assert "Downgrade below 0006 refused before any change" in output
-    assert _current(alembic) == f"{REVISION} (head)"
+    assert _current(alembic).split()[0] == REVISION  # 0006, whether or not a later revision exists
 
 
 def test_offline_sql_carries_the_guards_and_triggers(scratch6, alembic):

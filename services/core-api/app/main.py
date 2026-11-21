@@ -13,7 +13,7 @@ from .indexing.client import InvalidServiceUrl
 from .ingestion.dispatch import CeleryPublisher, Publisher
 from .limits import ConcurrencyLimiter, RateLimiter
 from .quiz.client import AiQuizClient
-from .routers import chat, courses, documents, quizzes
+from .routers import chat, courses, dashboard, documents, quizzes
 from .storage import LocalFileStorage
 
 _DEFAULT = object()
@@ -84,6 +84,7 @@ def create_app(
     app.include_router(courses.router)
     app.include_router(chat.router)
     app.include_router(quizzes.router)
+    app.include_router(dashboard.router)
 
     @app.get("/health")
     def health():

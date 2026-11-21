@@ -40,8 +40,13 @@ which Celery has selected before worker_init:
 - harvest (exactly the harvest queue, M6): DATABASE_URL and REDIS_URL, the
   same database checks, and while HARVEST_ENABLED a valid HARVEST_USER_AGENT.
   No upload store, no AI service, no provider request at start-up.
-A worker that consumes the index or the harvest queue together with any other
-queue is refused: the roles need different credentials, mounts and egress.
+- mastery (exactly the mastery queue, M8): DATABASE_URL, REDIS_URL and
+  AI_SERVICE_URL; while MASTERY_DELIVERY_ENABLED also AI_SERVICE_TOKEN and the
+  complete pins (model, version, state epoch, pseudonym namespace and key,
+  validated by Settings). No upload store; no AI request at start-up (the
+  capability probe runs inside the task, under its time limits).
+A worker that consumes the index, harvest or mastery queue together with any
+other queue is refused: the roles need different credentials, mounts and egress.
 """
 
 from __future__ import annotations
@@ -65,16 +70,18 @@ from ..indexing.client import AiIndexClient, InvalidServiceUrl, parse_service_ur
 from .dispatch import CeleryPublisher
 from .pipeline import WorkerContext
 
-REQUIRED_SCHEMA_REVISION = "0006"
+REQUIRED_SCHEMA_REVISION = "0007"
 REQUIRE_COMMENT_ENV = "DATABASE_REQUIRE_COMMENT"
 WORKER_ENVIRONMENT = ("DATABASE_URL", "REDIS_URL", "UPLOAD_DIR")
 BEAT_ENVIRONMENT = ("REDIS_URL",)
 INDEX_WORKER_ENVIRONMENT = ("DATABASE_URL", "REDIS_URL", "AI_SERVICE_URL")
 HARVEST_WORKER_ENVIRONMENT = ("DATABASE_URL", "REDIS_URL")
+MASTERY_WORKER_ENVIRONMENT = ("DATABASE_URL", "REDIS_URL", "AI_SERVICE_URL")
 MIN_TOKEN_LENGTH = 32
 ROLE_PROCESSING = "processing"
 ROLE_INDEX = "index"
 ROLE_HARVEST = "harvest"
+ROLE_MASTERY = "mastery"
 EX_CONFIG = 78
 
 log = logging.getLogger(__name__)
@@ -175,7 +182,9 @@ def worker_preflight(settings: Settings, environ: Mapping[str, str] = os.environ
 def worker_role(queues, settings: Settings) -> str:
     """The role of a worker consuming `queues` (names); refuses mixing the index queue with others."""
     names = set(queues or ())
-    for queue, role in ((settings.index_queue, ROLE_INDEX), (settings.harvest_queue, ROLE_HARVEST)):
+    dedicated = ((settings.index_queue, ROLE_INDEX), (settings.harvest_queue, ROLE_HARVEST),
+                 (settings.mastery_queue, ROLE_MASTERY))  # fmt: skip
+    for queue, role in dedicated:
         if queue not in names:
             continue
         if names != {queue}:
@@ -239,8 +248,37 @@ def harvest_worker_preflight(settings: Settings, environ: Mapping[str, str] = os
         log.warning("harvest worker preflight: HARVEST_ENABLED is false; harvest runs will not be claimed")
 
 
+def mastery_worker_preflight(settings: Settings, environ: Mapping[str, str] = os.environ) -> None:
+    """Start-up checks of the mastery worker: database and configuration only; no AI request here."""
+    require_environment(environ, MASTERY_WORKER_ENVIRONMENT)
+    try:
+        parse_service_url(environ.get("AI_SERVICE_URL", settings.ai_service_url))
+    except InvalidServiceUrl as exc:
+        raise PreflightError(str(exc)) from None
+    if settings.mastery_delivery_enabled:
+        token = environ.get("AI_SERVICE_TOKEN", "")
+        if not token.strip():
+            raise PreflightError("AI_SERVICE_TOKEN must be set explicitly while MASTERY_DELIVERY_ENABLED is true")
+        if len(token) < MIN_TOKEN_LENGTH or token != token.strip():
+            raise PreflightError(f"AI_SERVICE_TOKEN must be at least {MIN_TOKEN_LENGTH} characters, without spaces")
+        from ..mastery.pins import pins_of
+
+        if pins_of(settings) is None:  # Settings already refused malformed or missing pins; defence in depth
+            raise PreflightError("the mastery pins must be complete while MASTERY_DELIVERY_ENABLED is true")
+    target = database_target(environ)
+    check_database(target)
+    log.info(
+        "mastery worker preflight: database %s verified at revision %s",
+        describe_target(target.url), REQUIRED_SCHEMA_REVISION,
+    )  # fmt: skip
+    if not settings.mastery_delivery_enabled:
+        log.warning("mastery worker preflight: MASTERY_DELIVERY_ENABLED is false; no stream will be claimed")
+
+
 def preflight_for_role(role: str, settings: Settings, environ: Mapping[str, str] = os.environ) -> None:
-    if role == ROLE_INDEX:
+    if role == ROLE_MASTERY:
+        mastery_worker_preflight(settings, environ)
+    elif role == ROLE_INDEX:
         index_worker_preflight(settings, environ)
     elif role == ROLE_HARVEST:
         harvest_worker_preflight(settings, environ)
@@ -266,6 +304,7 @@ def exit_on_failure(check, *args) -> None:
 
 _state: dict = {
     "pid": None, "engine": None, "context": None, "publisher": None, "index_context": None, "harvest_context": None,
+    "mastery_context": None,
 }  # fmt: skip
 
 
@@ -273,7 +312,10 @@ def reset_after_fork() -> None:
     engine = _state.get("engine")
     if engine is not None:
         engine.dispose(close=False)  # never close connections that belong to the parent
-    _state.update(pid=None, engine=None, context=None, publisher=None, index_context=None, harvest_context=None)
+    _state.update(
+        pid=None, engine=None, context=None, publisher=None, index_context=None, harvest_context=None,
+        mastery_context=None,
+    )  # fmt: skip
 
 
 def _ensure_process_state(settings: Settings, celery_app, environ: Mapping[str, str]) -> None:
@@ -292,6 +334,7 @@ def _ensure_process_state(settings: Settings, celery_app, environ: Mapping[str, 
         publisher=CeleryPublisher(celery_app, settings),
         index_context=None,
         harvest_context=None,
+        mastery_context=None,
     )
 
 
@@ -340,6 +383,38 @@ def harvest_context(settings: Settings, celery_app, environ: Mapping[str, str] =
             session_factory=_state["context"].session_factory, settings=settings, connector_factory=connector
         )
     return _state["harvest_context"]
+
+
+def mastery_context(settings: Settings, celery_app, environ: Mapping[str, str] = os.environ):
+    """The mastery worker's per-process context: verified sessions and the mastery client (probe cache inside)."""
+    from ..mastery.client import AiMasteryClient
+    from ..mastery.runner import MasteryContext
+
+    _ensure_process_state(settings, celery_app, environ)
+    if _state["mastery_context"] is None:
+        _state["mastery_context"] = MasteryContext(
+            session_factory=_state["context"].session_factory, settings=settings, client=AiMasteryClient(settings)
+        )
+    return _state["mastery_context"]
+
+
+def stream_of(args: tuple, kwargs: dict) -> tuple[uuid.UUID, uuid.UUID] | None:
+    """(user, course) of a mastery message, or None unless it is exactly {"user_id", "course_id"} canonical UUIDs."""
+    if args or set(kwargs) != {"user_id", "course_id"}:
+        return None
+    ids = []
+    for key in ("user_id", "course_id"):
+        value = kwargs[key]
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = uuid.UUID(value)
+        except ValueError:
+            return None
+        if str(parsed) != value:
+            return None
+        ids.append(parsed)
+    return ids[0], ids[1]
 
 
 def run_id_of(args: tuple, kwargs: dict) -> uuid.UUID | None:
