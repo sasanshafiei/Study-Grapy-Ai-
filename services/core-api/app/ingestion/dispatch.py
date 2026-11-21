@@ -58,7 +58,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..celery_app import HARVEST_TASK, INDEX_TASK, PARSE_TASK, broker_transport_options
+from ..celery_app import HARVEST_TASK, INDEX_TASK, MASTERY_TASK, PARSE_TASK, broker_transport_options
 from ..config import Settings
 
 log = logging.getLogger(__name__)
@@ -161,6 +161,22 @@ class CeleryPublisher:
 
     def harvest_queue_depth(self) -> int:
         return self._depth(self._settings.harvest_queue)
+
+    def publish_mastery(self, user_id: uuid.UUID, course_id: uuid.UUID) -> None:
+        """M8: identifiers only, exactly {"user_id": "<uuid>", "course_id": "<uuid>"}."""
+
+        def send(connection) -> None:
+            channel = connection.default_channel
+            producer = connection.Producer(channel=channel)
+            self._app.send_task(
+                MASTERY_TASK, kwargs={"user_id": str(user_id), "course_id": str(course_id)},
+                queue=self._settings.mastery_queue, producer=producer, retry=False,
+            )  # fmt: skip
+
+        self._with_connection(send)
+
+    def mastery_queue_depth(self) -> int:
+        return self._depth(self._settings.mastery_queue)
 
 
 # --- reservations -----------------------------------------------------------------------------

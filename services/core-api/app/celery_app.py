@@ -33,7 +33,15 @@ RECONCILE_TASK = "ingestion.reconcile_files"
 # and the harvest maintenance tick (schedule, dispatch, recover, clean up).
 HARVEST_TASK = "harvest.run_slice"
 HARVEST_MAINTAIN_TASK = "harvest.maintain"
-MAINTENANCE_TASKS = (DISPATCH_TASK, RECOVER_TASK, RECONCILE_TASK, HARVEST_MAINTAIN_TASK)
+# M8: one delivery attempt of one mastery stream (mastery queue, dedicated mastery worker), the
+# mastery maintenance tick (recover, resume, dispatch) and the analytics/study-event tick
+# (weekly releases, telemetry retention). Both ticks are database work only: no upstream call.
+MASTERY_TASK = "mastery.deliver_stream"
+MASTERY_MAINTAIN_TASK = "mastery.maintain"
+ANALYTICS_MAINTAIN_TASK = "analytics.maintain"
+MAINTENANCE_TASKS = (
+    DISPATCH_TASK, RECOVER_TASK, RECONCILE_TASK, HARVEST_MAINTAIN_TASK, MASTERY_MAINTAIN_TASK, ANALYTICS_MAINTAIN_TASK,
+)  # fmt: skip
 
 
 def broker_transport_options(settings: Settings) -> dict:
@@ -57,6 +65,8 @@ def beat_schedule(settings: Settings) -> dict:
         "recover-stale-parse-jobs": entry(RECOVER_TASK, settings.recovery_interval_seconds),
         "reconcile-files": entry(RECONCILE_TASK, settings.reconcile_interval_seconds),
         "harvest-maintenance": entry(HARVEST_MAINTAIN_TASK, settings.harvest_maintenance_interval_seconds),
+        "mastery-maintenance": entry(MASTERY_MAINTAIN_TASK, settings.mastery_maintenance_interval_seconds),
+        "analytics-maintenance": entry(ANALYTICS_MAINTAIN_TASK, settings.analytics_maintenance_interval_seconds),
     }
 
 
@@ -89,6 +99,7 @@ def make_celery(settings: Settings) -> Celery:
             PARSE_TASK: {"queue": settings.parse_queue},
             INDEX_TASK: {"queue": settings.index_queue},
             HARVEST_TASK: {"queue": settings.harvest_queue},
+            MASTERY_TASK: {"queue": settings.mastery_queue},
             **{name: {"queue": settings.maintenance_queue} for name in MAINTENANCE_TASKS},
         },
         timezone="UTC",

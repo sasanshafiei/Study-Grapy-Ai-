@@ -227,6 +227,61 @@ course-consistent topic key ([quiz-api.md](quiz-api.md), "Data model").
 **Order.** Migrate before starting workers: they now require revision `0006`. The running
 M6 development environment stays at 0005 until it is deliberately migrated.
 
+## Revision 0007: mastery outbox and delivery, provenance, study events, analytics releases (M8)
+
+Tables: 25 before, **30 after** (`mastery_streams`, `mastery_outbox`, `mastery_model_state`,
+`study_events`, `analytics_weekly_releases`). No quota table: the study-event quota is an
+advisory transaction lock plus a count over an index ([study-events.md](study-events.md)).
+Changed: `attempts` (UNIQUE `attempts_mastery_event_key (id, user_id, course_id, topic_id,
+stats_attempts)`, the outbox key target; partial UNIQUE `attempts_topic_sequence_idx (user_id,
+topic_id, stats_attempts) WHERE quiz_item_id IS NOT NULL`; partial index
+`attempts_graded_course_submitted_idx`), `documents` (UNIQUE `documents_id_course_id_key`, the
+target of the study-event document key), `mastery_scores` (`course_id` backfilled from the topic
+and NOT NULL, composite topic key, provenance columns, `next_review_at` now `timestamptz`, values
+read as UTC, `mastery_scores_provenance_check`). Details: [ai-mastery-integration.md](ai-mastery-integration.md).
+
+- **Preflight** (`DO $migration_0007_preflight$`). Locks `topic_practice_stats, attempts IN
+  SHARE ROW EXCLUSIVE MODE` in M7's own lock order (statistics row, then attempt insert), held
+  until the migration commits: no graded attempt can commit between the checks, the backfill and
+  the new triggers, and an attempt transaction already open is waited for, not lost (tested with
+  an open transaction during `alembic upgrade`). Stops before any change when a graded attempt
+  sequence of a (student, topic) repeats or has a gap (`count <> max(stats_attempts)` or
+  `min <> 1`), when `stats_correct` is not the running count of correct answers, or when
+  `topic_practice_stats` disagrees with the graded attempts (count, correct count, course, or a
+  row without attempts). Reconcile such rows first; the message gives the counts only.
+- **Backfill.** One `mastery_outbox` row (`origin = 'backfill'`, `pending`) per existing graded
+  attempt and one `mastery_streams` row per (student, course), `ON CONFLICT DO NOTHING`, then a
+  count check (graded attempts = outbox rows) that aborts the migration otherwise. Legacy
+  attempts (no assignment) never get an event. Existing values are not changed, except the new
+  `mastery_scores.course_id` and the type of `next_review_at`. Legacy `mastery_scores` rows keep
+  their values and have no provenance: they are never shown as model output.
+- **Triggers** (outside the reflected-schema comparison; `tests/test_migration_0007.py`):
+  `attempts_mastery_sequence_guard` and `attempts_outbox_enqueue` (AFTER INSERT of a graded
+  attempt, so the row's CHECKs and M7's `attempts_guard` report first), `mastery_outbox_guard`
+  (BEFORE UPDATE), `analytics_weekly_releases_guard` (BEFORE UPDATE). The sequence guard locks the
+  statistics row (already locked by the grading path) and requires the attempt to carry exactly
+  its counters and to continue the previous graded attempt of the topic; legacy attempts,
+  statistics updates by an administrator and outbox deletes are not restricted (no broad
+  trigger). An administrator who corrects `topic_practice_stats` must keep it equal to the graded
+  attempts, otherwise the next graded attempt of that topic is refused (fail closed).
+- **NULL semantics.** Every multi-branch CHECK is `(...) IS TRUE`; the expressions live in
+  `app/schema_checks.py` and are asserted identical to the migration's copies.
+- **Downgrade guard.** `alembic downgrade 0006` is refused, before any change, while study
+  events, analytics releases, model predictions (`mastery_scores` with provenance) or delivery
+  state (outbox rows that are not `pending`, streams that are not plain `ready` or carry a batch,
+  claims or operator retries) exist. Pending outbox rows do not block it: a later upgrade
+  regenerates them from the immutable attempts. The downgrade turns `next_review_at` back into a
+  naive UTC timestamp.
+- **Deliberate removal** of M8 rows: delete `study_events`, `analytics_weekly_releases`,
+  `mastery_outbox`, M8 `mastery_scores`, `mastery_streams` in that order (outbox rows reference
+  attempts and streams), and reset `mastery_model_state` to `unknown`
+  (`tests/api_support.py::remove_m8_state`). Releases cannot be UPDATEd; delete only deliberately
+  (a deleted week would be regenerated from current data by the next tick).
+
+**Order.** Migrate before starting workers: every worker now requires revision `0007` and exits
+(status 78) otherwise. The running M7 development environment stays at 0006 until it is
+deliberately migrated; upgrading it is an operator step, not part of M8 delivery.
+
 ## Safety guard: which database a migration may touch
 
 `app/migration_safety.py` holds the checks; `migrations/env.py` applies them.

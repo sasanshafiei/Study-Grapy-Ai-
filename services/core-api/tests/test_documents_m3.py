@@ -161,6 +161,11 @@ def test_no_endpoint_exposes_parsed_content():
         "/api/v1/courses/{course_id}/quizzes": ["post"],
         "/api/v1/courses/{course_id}/quizzes/{quiz_id}": ["get"],
         "/api/v1/courses/{course_id}/attempts": ["post"],
+        # M8: dashboard (aggregates of the caller's own attempts), analytics (privacy-filtered
+        # releases) and study events (write-only telemetry); none returns document text.
+        "/api/v1/courses/{course_id}/dashboard": ["get"],
+        "/api/v1/courses/{course_id}/analytics": ["get"],
+        "/api/v1/courses/{course_id}/study-events": ["post"],
         "/health": ["get"],
         "/health/db": ["get"],
     }

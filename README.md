@@ -104,7 +104,11 @@ docs/decisions/   one short file per locked decision
    [docs/courses-api.md](docs/courses-api.md) and [docs/ai-chat-integration.md](docs/ai-chat-integration.md)
    (chat is off by default and needs the AI service's studygraph.chat/1); ~~`quizzes`, `attempts`~~ done (M7),
    see [docs/quiz-api.md](docs/quiz-api.md) (off by default; generation needs the proposed
-   studygraph.quiz/1, [docs/ai-quiz-integration.md](docs/ai-quiz-integration.md)).
+   studygraph.quiz/1, [docs/ai-quiz-integration.md](docs/ai-quiz-integration.md)); ~~`dashboard`,
+   `analytics`, `study-events`~~ done (M8), see [docs/dashboard-api.md](docs/dashboard-api.md),
+   [docs/analytics-privacy.md](docs/analytics-privacy.md) (off by default),
+   [docs/study-events.md](docs/study-events.md) (off by default) and
+   [docs/ai-mastery-integration.md](docs/ai-mastery-integration.md) (delivery off by default).
 3. Stand up the Celery worker and a first parse job.
 4. Build the external-source connectors (OpenStax, Wikipedia) and the harvester.
 

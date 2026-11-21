@@ -50,6 +50,11 @@ services:
       AI_SERVICE_URL: http://ai-service:8000
       ENVIRONMENT: development
       UPLOAD_DIR: /data/uploads
+      # M8: the deterministic dashboard is on; analytics and study telemetry stay off until approved.
+      DASHBOARD_ENABLED: "true"
+      ANALYTICS_ENABLED: "false"
+      STUDY_EVENTS_ENABLED: "false"
+      AI_RECOMMENDATIONS_ENABLED: "false"
     ports:
       - "8000:8000"
     depends_on:
@@ -87,7 +92,16 @@ services:
   worker-maintenance:
     <<: *ingestion-worker
     # Dispatch, lease recovery and file reconciliation, on their own queue and
-    # processes so that long parses can never starve them.
+    # processes so that long parses can never starve them. M8 adds two ticks here,
+    # both database-only (no upstream call): mastery recovery/dispatch and the
+    # analytics releases / study-event retention.
+    environment:
+      DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_DIR: /data/uploads
+      ENVIRONMENT: development
+      MASTERY_DELIVERY_ENABLED: "false"
+      ANALYTICS_ENABLED: "false"
     command: >-
       celery -A app.worker worker -Q ingestion.maintenance -c 2 -P prefork -n maintenance@%h
       --without-mingle --without-gossip --without-heartbeat -l INFO
@@ -150,6 +164,34 @@ services:
       - ./services/core-api:/app
     # Longer than the harvest task's hard time limit (270 s).
     stop_grace_period: 300s
+
+  # Mastery delivery (M8, docs/ai-mastery-integration.md). Consumes only the
+  # mastery queue, so slow model requests never block ingestion or harvest
+  # maintenance. Needs the database, Redis and the AI service; never the upload
+  # volume, no ports. MASTERY_DELIVERY_ENABLED stays false: while false it claims
+  # and sends nothing, and the mock ai-service is refused anyway (mock must be
+  # literally false). Activation needs the same flag on worker-maintenance,
+  # AI_SERVICE_TOKEN and the complete MASTERY_* pins (docs, "Activation").
+  worker-mastery:
+    build: ./services/core-api
+    command: >-
+      celery -A app.worker worker -Q mastery.deliver -c 2 -P prefork -n mastery@%h
+      --without-mingle --without-gossip --without-heartbeat -l INFO
+    environment:
+      DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+      REDIS_URL: redis://redis:6379/0
+      AI_SERVICE_URL: http://ai-service:8000
+      MASTERY_DELIVERY_ENABLED: "false"
+      ENVIRONMENT: development
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./services/core-api:/app
+    # Longer than the mastery task's hard time limit (75 s).
+    stop_grace_period: 105s
 
   beat:
     build: ./services/core-api
