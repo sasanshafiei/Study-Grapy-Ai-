@@ -13,7 +13,7 @@ from .indexing.client import InvalidServiceUrl
 from .ingestion.dispatch import CeleryPublisher, Publisher
 from .limits import ConcurrencyLimiter, RateLimiter
 from .quiz.client import AiQuizClient
-from .routers import chat, courses, dashboard, documents, quizzes
+from .routers import chat, courses, dashboard, documents, exam_questions, exams, quizzes
 from .storage import LocalFileStorage
 
 _DEFAULT = object()
@@ -43,6 +43,9 @@ def create_app(
     M7: the quiz client (None when AI_SERVICE_URL is invalid: generation then
     answers 503, already issued quizzes and local grading keep working) and the
     generation limiter live on app.state as well.
+
+    M9: the exam routers (all answer 503 after authorization while EXAMS_ENABLED is
+    off) and the export render/rate limiters.
     """
     settings = settings or default_settings
     app = FastAPI(title="StudyGraph Core API", version="0.1.0")
@@ -69,6 +72,11 @@ def create_app(
     app.state.join_rate_limiter = RateLimiter(
         settings.join_rate_limit_attempts, settings.join_rate_limit_window_seconds, settings.join_rate_limit_max_users
     )
+    # M9: renderer slots (global and one per professor) and the per-professor download rate (single process).
+    app.state.exam_export_limiter = ConcurrencyLimiter(settings.exam_export_max_concurrent, 1)
+    app.state.exam_export_rate_limiter = RateLimiter(
+        settings.exam_export_rate_limit, settings.exam_export_rate_window_seconds, settings.exam_export_rate_max_users
+    )
 
     # Wide-open CORS for development so web + mobile can call freely.
     # Tighten this before any public deployment.
@@ -85,6 +93,8 @@ def create_app(
     app.include_router(chat.router)
     app.include_router(quizzes.router)
     app.include_router(dashboard.router)
+    app.include_router(exam_questions.router)
+    app.include_router(exams.router)
 
     @app.get("/health")
     def health():
@@ -104,6 +114,6 @@ def create_app(
 
 app = create_app()
 
-# TODO (CE-1): add routers under app/routers/ for exams, admin. Keep them thin — they validate input,
+# TODO (CE-1): add routers under app/routers/ for admin. Keep them thin — they validate input,
 # call the AI service or the DB, and shape the response. Authentication is
 # CE-3's app.auth.get_current_user.

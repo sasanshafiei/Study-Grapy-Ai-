@@ -108,7 +108,10 @@ docs/decisions/   one short file per locked decision
    `analytics`, `study-events`~~ done (M8), see [docs/dashboard-api.md](docs/dashboard-api.md),
    [docs/analytics-privacy.md](docs/analytics-privacy.md) (off by default),
    [docs/study-events.md](docs/study-events.md) (off by default) and
-   [docs/ai-mastery-integration.md](docs/ai-mastery-integration.md) (delivery off by default).
+   [docs/ai-mastery-integration.md](docs/ai-mastery-integration.md) (delivery off by default); ~~`exam-questions`,
+   `exams` (manual professor exam builder, PDF/DOCX export)~~ done (M9-A1), see [docs/exam-api.md](docs/exam-api.md),
+   [docs/exam-export.md](docs/exam-export.md) and [docs/frontend-exam-adaptation.md](docs/frontend-exam-adaptation.md)
+   (off by default; AI-generated exam candidates are M9-A2 and wait for AI-1's protocol approval).
 3. Stand up the Celery worker and a first parse job.
 4. Build the external-source connectors (OpenStax, Wikipedia) and the harvester.
 

@@ -120,13 +120,68 @@ def remove_m8_state(connection, users: list, courses: list) -> None:
     )
 
 
+M9_GUARDS = (
+    ("exam_audit_events", "exam_audit_events_guard"), ("exam_items", "exam_items_guard"),
+    ("exam_blueprint_rows", "exam_blueprint_rows_guard"), ("exams", "exams_guard"),
+    ("exam_question_revisions", "exam_question_revisions_guard"), ("questions", "questions_bank_guard"),
+)  # fmt: skip
+
+
+def remove_m9_state(connection, users: list, courses: list) -> None:
+    """Delete M9 rows (revision 0008) of these users and courses, inside the caller's transaction.
+
+    This is the operator removal procedure of docs/database-migrations.md ("Deliberate removal of
+    exam data"): as the table owner, in one transaction, disable the M9 guards (ALTER TABLE is
+    transactional), delete audit events, idempotency keys, items, blueprint rows and exams, release
+    the questions' approved-revision key, delete revisions and bank questions, enable the guards.
+    Legacy questions that only carry a Bloom level are deleted by remove_quiz_state with the course.
+    """
+    if connection.execute(text("SELECT to_regclass('public.exams') IS NULL")).scalar_one():
+        return
+    ids = {"u": list(users), "c": list(courses)}
+    exams = "SELECT id FROM exams WHERE course_id = ANY(:c) OR created_by = ANY(:u)"
+    bank = "version IS NOT NULL AND (course_id = ANY(:c) OR created_by = ANY(:u))"
+    needed = connection.execute(
+        text(
+            f"SELECT EXISTS ({exams}) OR EXISTS (SELECT 1 FROM questions WHERE {bank}) "
+            "OR EXISTS (SELECT 1 FROM exam_audit_events WHERE course_id = ANY(:c) OR actor_id = ANY(:u)) "
+            "OR EXISTS (SELECT 1 FROM exam_idempotency_keys WHERE course_id = ANY(:c) OR user_id = ANY(:u)) "
+            "OR EXISTS (SELECT 1 FROM exam_question_revisions WHERE course_id = ANY(:c) OR approved_by = ANY(:u))"
+        ),
+        ids,
+    ).scalar_one()
+    if not needed:
+        return
+    for table, trigger in M9_GUARDS:
+        connection.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}"))
+    connection.execute(text("DELETE FROM exam_audit_events WHERE course_id = ANY(:c) OR actor_id = ANY(:u)"), ids)
+    connection.execute(text("DELETE FROM exam_idempotency_keys WHERE course_id = ANY(:c) OR user_id = ANY(:u)"), ids)
+    connection.execute(text(f"DELETE FROM exam_items WHERE exam_id IN ({exams}) OR course_id = ANY(:c)"), ids)
+    connection.execute(text(f"DELETE FROM exam_blueprint_rows WHERE exam_id IN ({exams}) OR course_id = ANY(:c)"), ids)
+    connection.execute(text(f"DELETE FROM exams WHERE id IN ({exams})"), ids)
+    connection.execute(
+        text(f"UPDATE questions SET approved_revision_no = NULL, status = 'draft' WHERE {bank} AND approved_revision_no IS NOT NULL"),
+        ids,
+    )
+    connection.execute(
+        text("DELETE FROM exam_question_revisions WHERE course_id = ANY(:c) OR approved_by = ANY(:u) "
+             f"OR question_id IN (SELECT id FROM questions WHERE {bank})"),
+        ids,
+    )  # fmt: skip
+    connection.execute(text(f"DELETE FROM questions WHERE {bank}"), ids)
+    for table, trigger in M9_GUARDS:
+        connection.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}"))
+
+
 def remove_quiz_state(connection, users: list, courses: list) -> None:
     """Delete M7 rows (and practice rows) of these users and courses, inside the caller's transaction.
 
     Graded attempts, assignments, sessions and generated questions are protected
     by triggers; like an operator, the test removes them as the table owner with
     those triggers disabled for this transaction only (ALTER TABLE is transactional).
+    M9 rows (which reference questions, topics, courses and users) are removed first.
     """
+    remove_m9_state(connection, users, courses)
     if connection.execute(text("SELECT to_regclass('public.quiz_sessions') IS NULL")).scalar_one():
         return
     ids = {"u": list(users), "c": list(courses)}

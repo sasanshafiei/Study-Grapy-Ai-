@@ -282,6 +282,77 @@ read as UTC, `mastery_scores_provenance_check`). Details: [ai-mastery-integratio
 (status 78) otherwise. The running M7 development environment stays at 0006 until it is
 deliberately migrated; upgrading it is an operator step, not part of M8 delivery.
 
+## Revision 0008: professor question bank, exams, blueprints, revisions, audit (M9-A1)
+
+Tables: 30 before, **36 after** (`exam_question_revisions`, `exams`, `exam_blueprint_rows`,
+`exam_items`, `exam_audit_events`, `exam_idempotency_keys`). Changed: `questions` gains five
+nullable columns without default (`version`, `created_by`, `updated_at`, `approved_revision_no`,
+`bloom_level`; metadata-only `ADD COLUMN`s), `questions_bloom_level_check`, `questions_bank_check`
+and the composite key `questions_approved_revision_fkey (id, approved_revision_no) ->
+exam_question_revisions (question_id, revision_no)` (added after that table; the two reference
+each other, `use_alter` in the ORM). API and rules: [exam-api.md](exam-api.md),
+[exam-export.md](exam-export.md).
+
+- **The M9 marker.** A bank question is exactly `questions.version IS NOT NULL` (always
+  `purpose = 'exam'`, status `draft | approved | retired`). Every new CHECK on `questions` is TRUE
+  for every legacy and M7 row through its first branch, so no existing row, test or error name
+  changes (PostgreSQL evaluates CHECKs in name order). Legacy `purpose = 'exam'` rows stay as they
+  are and are invisible to the exam API.
+- **Preflight** (`DO $migration_0008_preflight$`). Locks `questions, attempts IN SHARE ROW
+  EXCLUSIVE MODE` until commit and reports (NOTICE, counts only) legacy exam-purpose questions
+  and attempts on them. Nothing existing can violate a new constraint, so it never refuses.
+- **Keys.** Revisions, items and blueprint rows carry `course_id` on every path: items reference
+  `(question_id, course_id, purpose)` with `purpose` CHECKed to `'exam'` (an item can never name a
+  practice question or one of another course), `(exam_id, course_id)`, the pinned revision
+  `(question_id, question_revision_no)` and a blueprint row of the same exam
+  `(blueprint_row_id, exam_id) -> exam_blueprint_rows (id, exam_id)`. Positions:
+  `exam_items_exam_id_position_key` and `exam_blueprint_rows_exam_id_position_key` are
+  `UNIQUE (exam_id, position) DEFERRABLE INITIALLY DEFERRED` (checked at commit or at
+  `SET CONSTRAINTS ... IMMEDIATE`, so rows and items can be reordered in one transaction);
+  `exam_blueprint_rows_id_exam_id_key UNIQUE (id, exam_id)` stays non-deferrable because it is a
+  foreign-key target. No M9 statement uses `ON CONFLICT` on a position constraint.
+- **Triggers** (outside the reflected-schema comparison; `tests/test_migration_0008.py`):
+  `questions_bank_guard` (fires before M7's `questions_guard`; inserted as draft version 1, version
+  +1 per UPDATE, immutable identity, documented transitions only, approval/retirement change no
+  content, `approved` needs the newest revision with the same hash, no DELETE, a legacy row can
+  never become a bank row), `exam_question_revisions_guard` (locks the question FOR UPDATE, draft
+  only, contiguous numbers, exact copy of the working copy incl. the `(document_id, locator)`
+  sequence; no UPDATE/DELETE), `exams_guard` (no DELETE, identity immutable, version +1, only
+  draft->draft|finalized|archived and finalized->archived, which changes nothing but status,
+  `archived_at`, version and `updated_at`; at draft->finalized it verifies items 1..n, every item
+  pinned to its question's current approved revision, totals, `finalized_version` and the
+  blueprint decision against the pinned revisions), `exam_items_guard` and
+  `exam_blueprint_rows_guard` (writes only while the exam is a draft, parent FOR SHARE; identity
+  immutable), `exam_audit_events_guard` (append-only), `attempts_exam_guard` (fires before M7's
+  `attempts_guard`: no attempt can be inserted on, or moved to, an exam-purpose question; existing
+  rows are untouched) and statement-level `*_truncate_guard` on `exams`, `exam_items`,
+  `exam_question_revisions`, `exam_audit_events`. No M7/M8 function is changed.
+- **NULL semantics.** Every multi-branch CHECK is `(...) IS TRUE`; `exams_state_check` compares
+  the deviation status with `IS NOT DISTINCT FROM`, so a draft (both NULL) passes and nothing
+  slips through as "unknown". The expressions live in `app/schema_checks.py` and are asserted
+  identical to the migration's copies (MIG-04).
+- **Downgrade guard** (`DO $migration_0008_downgrade_guard$`, ACCESS EXCLUSIVE locks).
+  `alembic downgrade 0007` is refused, before any change, while any row exists in the six new
+  tables or any question has `version` or `bloom_level` set. Otherwise it removes exactly what
+  upgrade added (catalog snapshot, triggers, functions and data checksums equal to 0007, MIG-05).
+- **Limits of the guarantees.** Triggers do not hold against the table owner or a superuser who
+  disables them (`ALTER TABLE ... DISABLE TRIGGER`, `session_replication_role = replica`), drops
+  constraints, restores dumps or edits catalogs; TRUNCATE is refused by the statement triggers.
+- **Deliberate removal of exam data** (operator only, as the table owner, in ONE transaction):
+  disable `exam_audit_events_guard`, `exam_items_guard`, `exam_blueprint_rows_guard`,
+  `exams_guard`, `exam_question_revisions_guard`, `questions_bank_guard`; delete
+  `exam_audit_events`, `exam_idempotency_keys`, `exam_items`, `exam_blueprint_rows`, `exams`; set
+  `approved_revision_no = NULL, status = 'draft'` on the bank questions; delete
+  `exam_question_revisions`, then the bank questions; enable the six guards. The test helper
+  `tests/api_support.py::remove_m9_state` is exactly this procedure (it keeps the runner's final
+  `downgrade base` working).
+
+**Order.** Migrate before starting workers or the M9 API: every worker now requires revision
+`0008` and exits (status 78) otherwise. The running M8 development environment stays at 0007
+until it is deliberately migrated (adoption plan: M9_IMPLEMENTATION_TEST_PLAN.md §8, explicit
+go-ahead required); with every M9 switch off no M9 state can be created, so a downgrade stays
+possible.
+
 ## Safety guard: which database a migration may touch
 
 `app/migration_safety.py` holds the checks; `migrations/env.py` applies them.
