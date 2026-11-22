@@ -26,7 +26,6 @@ class Settings(BaseSettings):
     redis_url: SecretStr = SecretStr("redis://redis:6379/0")
     ai_service_url: str = "http://ai-service:8000"
     environment: str = "development"
-
     # Root of the uploaded-file store. docker-compose mounts the persistent
     # `uploads` volume here; nothing creates or touches it until the first upload.
     upload_dir: Path = Path("/data/uploads")
@@ -309,6 +308,33 @@ class Settings(BaseSettings):
     # current prediction that covers every committed attempt of the topic.
     mastery_prediction_max_age_days: int = Field(default=30, ge=1, le=365)
 
+    # --- professor exams (M9-A1, docs/exam-api.md, docs/exam-export.md) ------------------------------
+    # Every switch is OFF by default and fails closed: while off, every exam endpoint answers 503 after
+    # authorization (EXAM_EXPORT_ENABLED: only the file endpoints). EXAM_GENERATION_ENABLED belongs to
+    # M9-A2 and is refused below until an approved AI-1 integration exists.
+    exams_enabled: bool = False
+    exam_export_enabled: bool = False
+    exam_generation_enabled: bool = False
+    exam_max_body_bytes: int = Field(default=64 * 1024, ge=4096, le=MIB)
+    exam_body_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    exam_max_items: int = Field(default=200, ge=1, le=200)
+    exam_max_bank_questions: int = Field(default=5000, ge=1, le=100_000)
+    exam_max_exams: int = Field(default=500, ge=1, le=10_000)
+    # Total printable code points per exam over every text the answer-key variant prints (architecture
+    # §9.10, calibrated by the EXP-16 maximum-boundary renders). The database CHECK caps it at 300,000.
+    exam_export_max_content_chars: int = Field(default=300_000, ge=1000, le=300_000)
+    # Renderer subprocess (resource limits, not an OS sandbox) and download limits.
+    exam_export_max_concurrent: int = Field(default=2, ge=1, le=16)
+    exam_export_rate_limit: int = Field(default=30, ge=1, le=1000)
+    exam_export_rate_window_seconds: int = Field(default=600, ge=10, le=86400)
+    exam_export_rate_max_users: int = Field(default=10_000, ge=10, le=1_000_000)
+    exam_export_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    exam_export_cpu_seconds: int = Field(default=25, ge=1, le=120)
+    exam_export_memory_mb: int = Field(default=512, ge=256, le=4096)
+    exam_export_max_input_bytes: int = Field(default=2 * MIB, ge=64 * 1024, le=16 * MIB)
+    exam_export_max_pdf_bytes: int = Field(default=16 * MIB, ge=MIB, le=64 * MIB)
+    exam_export_max_docx_bytes: int = Field(default=8 * MIB, ge=MIB, le=64 * MIB)
+
     @model_validator(mode="after")
     def _ordered_limits(self) -> "Settings":
         """parse timeout < soft limit < hard limit (< lease), visibility timeout above both."""
@@ -392,6 +418,14 @@ class Settings(BaseSettings):
             raise ValueError("MASTERY_BACKOFF_MAX_SECONDS must not be below MASTERY_BACKOFF_BASE_SECONDS")
         if self.ai_recommendations_enabled:
             raise ValueError("AI_RECOMMENDATIONS_ENABLED cannot be true: no AI recommendation integration exists in M8")
+        if self.exam_generation_enabled:
+            raise ValueError(
+                "EXAM_GENERATION_ENABLED cannot be true: AI exam generation (M9-A2) needs an approved AI-1 protocol first"
+            )
+        if self.exam_export_enabled and not self.exams_enabled:
+            raise ValueError("EXAM_EXPORT_ENABLED requires EXAMS_ENABLED")
+        if not self.exam_export_cpu_seconds < self.exam_export_timeout_seconds:
+            raise ValueError("EXAM_EXPORT_CPU_SECONDS must be below EXAM_EXPORT_TIMEOUT_SECONDS")
         from .mastery.pins import validate_pins  # local: dependency-free
 
         validate_pins(self)  # raises ValueError for malformed pins (and missing ones while delivery is enabled)

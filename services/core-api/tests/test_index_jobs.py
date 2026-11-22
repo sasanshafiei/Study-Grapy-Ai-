@@ -7,6 +7,7 @@ recovery, refusals), not that any real AI service indexes anything.
 
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +23,7 @@ from app.ingestion import dispatch, jobs
 from app.ingestion.jobs import Failure, FailureStatus
 from app.ingestion.normalize import Section
 from tests.api_support import DOCUMENT_ITEM_KEYS
+from tests.index_writer import persist
 from tests.fake_ai_service import TOKEN, FakeAiService, Fault
 from tests.pdf_samples import make_pdf
 from tests.worker_support import document_row, job_row, sections_of, wait_for
@@ -45,8 +47,8 @@ def factory(world):
 
 
 @pytest.fixture
-def fake():
-    service = FakeAiService().start()
+def fake(world):
+    service = FakeAiService(persist=lambda body: persist(world.engine, body)).start()
     yield service
     service.stop()
 
@@ -148,6 +150,21 @@ def test_mock_incompatible_or_unavailable_services_consume_no_attempt(world, par
 # --- confirmed completion ---------------------------------------------------------------------------
 
 
+def test_receipt_without_committed_rows_never_publishes(world, parsed, ctx, fake):
+    document_id, job_id = parsed()
+    with ctx.session_factory() as session:
+        request = request_for(session, document_id)
+    receipt = {"protocol": "studygraph.index/1", "status": "indexed", "document_id": str(document_id),
+               "course_id": str(request.course_id), "content_digest": request.content_digest,
+               "idempotency_key": request.idempotency_key, "section_count": request.section_count,
+               "chunk_count": request.section_count, "replayed": False}
+    fake.faults.append(Fault("status", status=200, body=json.dumps(receipt).encode()))
+    assert world.scalar("SELECT count(*) FROM chunks WHERE document_id = :d", d=document_id) == 0
+    result = run_index_job(job_id, ctx)
+    assert result.outcome == "requeued" and result.code == "index_proof_missing"
+    assert _doc(world, document_id)["status"] == "pending"
+
+
 def test_confirmed_indexing_completes_job_and_document_together(world, parsed, ctx, fake):
     document_id, job_id = parsed()
     result = run_index_job(job_id, ctx)
@@ -244,7 +261,7 @@ def test_a_stale_attempt_writes_nothing_after_recovery(world, parsed, factory, c
     assert result.requeued == (job_id,)
     with factory() as session:
         digest = request_for(session, document_id).content_digest
-    assert jobs.complete_index(factory, stale, digest) is jobs.CompletionStatus.STALE
+    assert jobs.complete_index(factory, stale, digest, 1) is jobs.CompletionStatus.STALE
     failure = Failure("ai_timeout", "x", permanent=True)
     assert jobs.record_failure(factory, stale, failure, ctx.settings) is FailureStatus.STALE
     assert (_job(world, job_id)["status"], _doc(world, document_id)["status"]) == ("queued", "pending")
@@ -373,7 +390,7 @@ def test_a_document_that_is_no_longer_pending_is_left_alone(world, parsed, ctx, 
 )
 def test_content_changed_while_indexing_is_never_marked_indexed(world, parsed, ctx, fake, change):
     document_id, job_id = parsed()
-    fake.block()
+    fake.faults.append(Fault("hold_after_commit"))
     outcome = {}
     worker = threading.Thread(target=lambda: outcome.setdefault("r", run_index_job(job_id, ctx)))
     worker.start()

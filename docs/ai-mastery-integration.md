@@ -1,10 +1,9 @@
 # AI-2 mastery integration: studygraph.mastery/1 (M8)
 
 **Status: core-api side implemented; delivery OFF by default (`MASTERY_DELIVERY_ENABLED=false`).**
-The protocol is a **proposal** until AI-2 and CE approve it; the shared OpenAPI contract
-(`contracts/ai-service.openapi.yaml`) and the AI service are not changed by M8. The current
-AI-service mock for `/mastery/update` is refused (no literal `mock: false`, made-up fields).
-No real AI request, provider traffic or model activation happens in M8.
+The shared release candidate describes the CE delivery protocol pending AI-2 and CE
+approval. The fixture provider reports `mock: true` on both operations, which CE refuses.
+[Provider handoff](ai-provider-handoff.md)
 
 Ownership: core-api owns the attempts (immutable events), the delivery state and the stored
 predictions. The AI service computes predictions; it **never writes** `mastery_scores`,

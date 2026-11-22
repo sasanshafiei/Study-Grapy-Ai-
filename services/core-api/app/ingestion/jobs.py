@@ -132,6 +132,8 @@ class Claim:
 
 class CompletionStatus(enum.Enum):
     COMPLETED = "completed"
+    PROOF_MISSING = "index_proof_missing"
+    ROUTING_CHANGED = "index_routing_changed"
     STALE = "stale"  # the attempt no longer owns the job; nothing written
     DOCUMENT_NOT_PENDING = "document_not_pending"  # job failed, document untouched
     INDEX_CONFLICT = "index_conflict"  # an index job was already active; nothing written
@@ -535,20 +537,22 @@ def retry_parse(session_factory: sessionmaker[Session], document_id: uuid.UUID) 
 # --- index completion (M4) ------------------------------------------------------------------
 
 
-def complete_index(session_factory: sessionmaker[Session], claim: Claim, sent_digest: str) -> CompletionStatus:
+def complete_index(
+    session_factory: sessionmaker[Session], claim: Claim, sent_digest: str, receipt_chunks: int
+) -> CompletionStatus:
     """Record a *confirmed* indexing of the content whose digest was `sent_digest`.
 
     Called only after the AI service confirmed (HTTP 200, validated, echoing
     this request's document, course, digest and key). One transaction, fenced
     by the attempt token: lock the job, lock the document and check it is
     still pending, read the sections FOR SHARE and recompute the canonical
-    content digest from what is stored *now*. Only if it equals the digest
-    that was indexed does the job succeed and the document become `indexed`.
+    content digest from what is stored *now*. Verify the committed generation
+    and its actual vector-bearing source chunks before publishing, within the lease.
     A different digest means the content changed while it was being indexed:
     the job and the document fail (`index_content_changed`), nothing is
     marked indexed, and nothing is re-sent automatically.
     """
-    from ..indexing.payload import InvalidIndexContent, request_for  # no import cycle at module load
+    from ..indexing.payload import InvalidIndexContent, request_for
 
     if claim.kind != "index":
         raise ValueError("complete_index needs an index claim")
@@ -569,47 +573,67 @@ def complete_index(session_factory: sessionmaker[Session], claim: Claim, sent_di
                 ).one_or_none()
             external = facts is not None and facts.external_resource_id is not None
             source_enabled = resource = None
-            if external:
+            if facts is not None and facts.source_id is not None:
                 source_enabled = session.execute(
                     text("SELECT enabled FROM sources WHERE id = :s FOR SHARE"), {"s": facts.source_id}
                 ).scalar_one_or_none()
+            if external:
                 resource = session.execute(
                     text("SELECT state, current_document_id FROM external_resources WHERE id = :r FOR NO KEY UPDATE"),
                     {"r": facts.external_resource_id},
                 ).one_or_none()
             owned = _lock_owned(session, claim)
-            if owned is None:
+            if owned is None or owned.document_id != claim.document_id:
                 session.rollback()
                 return CompletionStatus.STALE
-            document_status = session.execute(
-                text("SELECT status FROM documents WHERE id = :id FOR UPDATE"), {"id": owned.document_id}
-            ).scalar_one()
+            locked = session.execute(
+                text("SELECT status, course_id, origin, source_id, external_resource_id "
+                     "FROM documents WHERE id = :id FOR UPDATE"), {"id": owned.document_id}
+            ).one()
+            if facts is None or tuple(locked[1:]) != tuple(facts):
+                session.rollback()  # routing changed while acquiring the ordered source/resource locks
+                return CompletionStatus.ROUTING_CHANGED
+            document_status = locked.status
             if document_status != "pending":
                 _finish_failed(session, claim.job_id, f"document_not_pending: document status is {document_status}")
                 session.commit()
                 return CompletionStatus.DOCUMENT_NOT_PENDING
+            source_required = facts.source_id is not None or facts.origin == "external"
+            if (source_required and source_enabled is not True) or (external and (gate is None or not gate.enabled)):
+                _finish_failed(session, claim.job_id, "external_inactive: source disabled or course opted out")
+                _fail_document(session, owned.document_id, PUBLIC_MESSAGES["external_inactive"])
+                session.commit()
+                return CompletionStatus.EXTERNAL_INACTIVE
             if external:
-                if gate is None or gate.enabled is not True or source_enabled is not True:
-                    _finish_failed(session, claim.job_id, "external_inactive: source disabled or course opted out")
-                    _fail_document(session, owned.document_id, PUBLIC_MESSAGES["external_inactive"])
-                    session.commit()
-                    return CompletionStatus.EXTERNAL_INACTIVE
-                if resource is None or resource.state != "accepted" or resource.current_document_id != owned.document_id:
+                live_version = session.execute(
+                    text("SELECT stale_reason IS NULL FROM external_document_versions "
+                         "WHERE document_id = :id AND resource_id = :r FOR SHARE"),
+                    {"id": owned.document_id, "r": facts.external_resource_id},
+                ).scalar_one_or_none()
+                if not live_version or resource is None or resource.state != "accepted" or resource.current_document_id != owned.document_id:
                     _finish_failed(session, claim.job_id, "index_superseded: a newer version or a missing page replaced it")
                     _mark_stale(session, owned.document_id, "superseded")
                     session.commit()
                     return CompletionStatus.SUPERSEDED
             try:
-                current = request_for(session, owned.document_id, lock_sections=True).content_digest
-            except InvalidIndexContent as exc:
-                current = f"invalid ({exc})"
-            if current != sent_digest:
+                current = request_for(session, owned.document_id, lock_sections=True)
+            except InvalidIndexContent:
+                current = None
+            if current is None or current.content_digest != sent_digest:
                 _finish_failed(
                     session, claim.job_id, "index_content_changed: stored content no longer matches the indexed digest"
                 )
                 _fail_document(session, owned.document_id, PUBLIC_MESSAGES["index_content_changed"])
                 session.commit()
                 return CompletionStatus.CONTENT_CHANGED
+            verified = session.execute(
+                text("SELECT public.verified_index_generation(:doc, :course, :key, :digest, :sections, :chunks)"),
+                {"doc": current.document_id, "course": current.course_id, "key": current.idempotency_key,
+                 "digest": current.content_digest, "sections": current.section_count, "chunks": receipt_chunks},
+            ).scalar_one()
+            if not verified:
+                session.rollback()
+                return CompletionStatus.PROOF_MISSING
             if external:
                 previous = session.execute(
                     text(
@@ -620,13 +644,17 @@ def complete_index(session_factory: sessionmaker[Session], claim: Claim, sent_di
                 ).scalar_one_or_none()
                 if previous is not None:  # old -> stale first: one indexed version per resource
                     _mark_stale(session, previous, "superseded")
-            session.execute(
+            finished = session.execute(
                 text(
                     "UPDATE ingestion_jobs SET status = 'succeeded', finished_at = now(), lease_expires_at = NULL, "
-                    "error_message = NULL, updated_at = now() WHERE id = :job_id AND attempt_token = :token"
+                    "error_message = NULL, updated_at = now() WHERE id = :job_id AND attempt_token = :token "
+                    "AND lease_expires_at > clock_timestamp() RETURNING id"
                 ),
                 {"job_id": claim.job_id, "token": claim.token},
-            )
+            ).scalar_one_or_none()
+            if finished is None:
+                session.rollback()  # also undo any external-version switch
+                return CompletionStatus.STALE
             session.execute(
                 text("UPDATE documents SET status = 'indexed', error_message = NULL WHERE id = :id"),
                 {"id": owned.document_id},

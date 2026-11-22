@@ -1,10 +1,8 @@
 # studygraph.quiz/1 — proposed AI quiz generation protocol (M7)
 
-**Status: PROPOSAL.** core-api M7 implements the client side of this protocol over the
-existing `/ai/v1/quiz/generate` path. The shared contract (`contracts/ai-service.openapi.yaml`)
-and the AI service code are owned by other team members and are **not** changed by M7;
-adopting (or revising) this protocol is a separate, reviewed change by the AI team.
-Until a real implementation answers `mock: false`, core-api generates nothing.
+**PROPOSED.** The shared release candidate describes the synchronous CE quiz adapter.
+Activation requires joint approval and a conformant AI-1 provider. The packaged fixture
+provider always reports `mock: true`. [Provider handoff](ai-provider-handoff.md)
 
 ## Endpoints
 
@@ -134,8 +132,7 @@ that generation works.
 
 ## Open points for the AI team
 
-1. Agree the schema above (or propose changes) and add it to the shared OpenAPI in a
-   reviewed change; the current OpenAPI entry describes `/quiz/generate` as a job.
+1. Jointly approve the synchronous quiz profile published in the shared release candidate.
 2. Retrieval per topic (`chunk_topics` or the AI side's own topic assignment).
 3. Latency budget for 10 questions (target from the brief: under 30 s; not measured).
 4. Quality evaluation of stems/hints/distractors before activation.

@@ -1,0 +1,10 @@
+**
+!services/
+!services/ai-service/
+!services/ai-service/app/
+!services/ai-service/app/*.py
+!services/ai-service/requirements.txt
+!contracts/
+!contracts/ai-service.openapi.yaml
+!contracts/fixtures/
+!contracts/fixtures/*.json

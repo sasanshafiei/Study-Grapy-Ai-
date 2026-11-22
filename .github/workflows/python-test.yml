@@ -31,6 +31,11 @@ jobs:
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
         # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    - name: Check published CE-1 OpenAPI contract
+      run: |
+        docker build -q -t ce1-openapi-check ./services/core-api
+        docker run --rm --network none -v "$PWD/contracts:/contracts:ro" ce1-openapi-check \
+          python -m scripts.export_openapi --check /contracts/core-api.v1.openapi.json
     - name: Test core-api migrations
       run: |
         bash ./services/core-api/scripts/test_migrations.sh -v

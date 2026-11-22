@@ -1,0 +1,89 @@
+{
+  "capabilities": {
+    "protocol": "studygraph.chat/1",
+    "service": "ai-service",
+    "mock": false,
+    "scopes": [
+      "class_only",
+      "class_plus_external"
+    ],
+    "max_question_chars": 20000
+  },
+  "request": {
+    "protocol": "studygraph.chat/1",
+    "request_id": "00000000-0000-0000-0000-000000000005",
+    "course_id": "00000000-0000-0000-0000-000000000001",
+    "scope": "class_only",
+    "allowed_origins": [
+      "class"
+    ],
+    "question": "How does a catalyst affect a reaction?",
+    "max_citations": 4,
+    "max_answer_chars": 4000
+  },
+  "response": {
+    "protocol": "studygraph.chat/1",
+    "request_id": "00000000-0000-0000-0000-000000000005",
+    "course_id": "00000000-0000-0000-0000-000000000001",
+    "scope": "class_only",
+    "mock": false,
+    "grounded": true,
+    "answer": "A catalyst lowers the activation energy of a reaction. [1]",
+    "citations": [
+      {
+        "marker": 1,
+        "chunk_id": "00000000-0000-0000-0000-000000000003",
+        "document_id": "00000000-0000-0000-0000-000000000002",
+        "origin": "class",
+        "quote": "A catalyst lowers the activation energy of a reaction."
+      }
+    ],
+    "topic_ids": [
+      "00000000-0000-0000-0000-000000000004"
+    ],
+    "used_web": false
+  },
+  "invalid_responses": [
+    {
+      "path": [
+        "citations",
+        0,
+        "marker"
+      ],
+      "value": 0,
+      "schema_valid": false
+    },
+    {
+      "path": [
+        "citations",
+        0,
+        "origin"
+      ],
+      "value": "external",
+      "schema_valid": true
+    },
+    {
+      "path": [
+        "citations",
+        0,
+        "document_id"
+      ],
+      "value": "missing",
+      "schema_valid": false
+    },
+    {
+      "path": [
+        "answer"
+      ],
+      "value": "A catalyst lowers the activation energy of a reaction. [2]",
+      "schema_valid": true
+    },
+    {
+      "path": [
+        "used_web"
+      ],
+      "value": true,
+      "schema_valid": false
+    }
+  ]
+}

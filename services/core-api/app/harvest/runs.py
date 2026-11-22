@@ -485,10 +485,15 @@ def cleanup_history(session_factory: sessionmaker[Session], settings: Settings) 
     with session_factory() as session:
         deleted = session.execute(
             text(
-                "DELETE FROM harvest_runs WHERE id IN (SELECT id FROM harvest_runs "
-                "WHERE status IN ('succeeded', 'failed', 'cancelled') "
-                "AND finished_at < now() - :days * interval '1 day' ORDER BY finished_at, id LIMIT :limit "
-                "FOR UPDATE SKIP LOCKED)"
+                """
+                WITH victims AS MATERIALIZED (
+                    SELECT id FROM harvest_runs
+                    WHERE status IN ('succeeded', 'failed', 'cancelled')
+                      AND finished_at < now() - :days * interval '1 day'
+                    ORDER BY finished_at, id LIMIT :limit FOR UPDATE SKIP LOCKED
+                )
+                DELETE FROM harvest_runs AS r USING victims WHERE r.id = victims.id
+                """
             ),
             {"days": settings.harvest_history_retention_days, "limit": settings.harvest_history_cleanup_batch},
         ).rowcount

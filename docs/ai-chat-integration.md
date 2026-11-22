@@ -1,10 +1,9 @@
 # AI chat integration (M5) — CE-side proposal "studygraph.chat/1"
 
-Status: **proposal**, implemented on the CE side only and **off by default**
-(`CHAT_ENABLED=false`). No AI-owned code, no shared OpenAPI change, no real LLM,
-retrieval, harvesting or web search exists. The CE tests use an isolated raw-socket
-test double (`services/core-api/tests/fake_chat_service.py`), which is not evidence
-that real answering works.
+**PROPOSED.** The shared release candidate describes the CE chat adapter.
+`CHAT_ENABLED=false` by default. The packaged fixture provider identifies itself as a mock.
+CE integration tests use an isolated raw-socket provider. Real retrieval and generation
+require AI-1 implementation and joint approval. [Provider handoff](ai-provider-handoff.md)
 
 Related: CE-2's web contract (`contracts/core-api.web.md` on the `ce2/web-app` branch,
 §1 "`/courses/{id}/chat` streams server-sent events"), and the M4 proposal

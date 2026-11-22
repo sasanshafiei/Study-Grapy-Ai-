@@ -1,0 +1,97 @@
+{
+  "capabilities": {
+    "protocol": "studygraph.mastery/1",
+    "service": "ai-service",
+    "mock": false,
+    "model": {
+      "name": "fixture-model",
+      "version": "1"
+    },
+    "state_epoch": "00000000-0000-0000-0000-000000000008",
+    "max_events": 100,
+    "ordering": "per_topic"
+  },
+  "request": {
+    "protocol": "studygraph.mastery/1",
+    "request_id": "00000000-0000-0000-0000-000000000005",
+    "state_epoch": "00000000-0000-0000-0000-000000000008",
+    "pseudonym_namespace": "fixture-v1",
+    "course_ref": "4ec3bcaa5c1dc95341f1188d7b43f71ce41ac506b6d2120784f1446323bae804",
+    "learner_ref": "120ab869f38192d83a0fef1a1fb2b4be61691eb86cab95f203c086b969b1ee5f",
+    "events": [
+      {
+        "event_id": "00000000-0000-0000-0000-000000000007",
+        "topic_id": "00000000-0000-0000-0000-000000000004",
+        "topic_seq": 1,
+        "qtype": "mcq",
+        "difficulty": "easy",
+        "correct": true,
+        "hint_used": 0,
+        "response_ms": 1800,
+        "telemetry_trusted": false,
+        "submitted_at": "2026-01-01T09:30:00.000Z"
+      }
+    ]
+  },
+  "response": {
+    "protocol": "studygraph.mastery/1",
+    "request_id": "00000000-0000-0000-0000-000000000005",
+    "state_epoch": "00000000-0000-0000-0000-000000000008",
+    "course_ref": "4ec3bcaa5c1dc95341f1188d7b43f71ce41ac506b6d2120784f1446323bae804",
+    "learner_ref": "120ab869f38192d83a0fef1a1fb2b4be61691eb86cab95f203c086b969b1ee5f",
+    "mock": false,
+    "model": {
+      "name": "fixture-model",
+      "version": "1"
+    },
+    "applied_event_ids": [
+      "00000000-0000-0000-0000-000000000007"
+    ],
+    "duplicate_event_ids": [],
+    "scores": [
+      {
+        "topic_id": "00000000-0000-0000-0000-000000000004",
+        "mastery": 0.5,
+        "attempts_seen": 1,
+        "through_seq": 1,
+        "next_review_at": null
+      }
+    ]
+  },
+  "invalid_responses": [
+    {
+      "path": [
+        "scores",
+        0,
+        "mastery"
+      ],
+      "value": 1.1,
+      "schema_valid": false
+    },
+    {
+      "path": [
+        "scores",
+        0,
+        "through_seq"
+      ],
+      "value": 2,
+      "schema_valid": true
+    },
+    {
+      "path": [
+        "duplicate_event_ids"
+      ],
+      "value": [
+        "00000000-0000-0000-0000-000000000007"
+      ],
+      "schema_valid": true
+    },
+    {
+      "path": [
+        "learner_ref"
+      ],
+      "value": "0000000000000000000000000000000000000000000000000000000000000000",
+      "schema_valid": true
+    }
+  ]
+}

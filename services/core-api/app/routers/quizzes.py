@@ -33,6 +33,7 @@ from ..quiz.diagnostics import describe, internal_error
 from ..quiz.generation import QuizRequest, create_quiz, read_quiz
 from ..quiz.protocol import REQUEST_DIFFICULTIES, canonical_uuid, parse_quiz_scopes
 from ..schemas.documents import ErrorBody
+from ..schemas.openapi import BEARER, LOCATION, REPLAYED, RETRY_AFTER, STRING, UUID, enum, exact, validation_error
 from ..schemas.quiz import AttemptResponse, QuizResponse
 
 log = logging.getLogger(__name__)
@@ -47,8 +48,15 @@ MAX_HINTS = 1  # M7 shows one hint per question
 MAX_RESPONSE_MS = 3_600_000
 
 _ERRORS: dict[int | str, dict[str, Any]] = {
-    status: {"model": ErrorBody} for status in (400, 401, 403, 404, 408, 409, 413, 415, 422, 429, 502, 503, 504)
+    **{status: {"model": ErrorBody} for status in (403, 404, 500, 503)},
+    401: {"model": ErrorBody, "headers": BEARER},
 }
+_WRITE_ERRORS = {**{s: {"model": ErrorBody} for s in (400, 408, 413, 415)}, 422: validation_error()}
+_GENERATION_ERROR = {"description": "Quiz generation unavailable or failed. A failed reservation may include recovery fields.",
+                     "content": {"application/json": {"schema": {
+                         "type": "object", "required": ["code", "detail"],
+                         "properties": {"code": STRING, "detail": STRING, "quiz_id": UUID,
+                                        "status": enum("failed"), "retry": enum("new_idempotency_key")}}}}}
 _QUIZ_BODY = {
     "requestBody": {
         "required": True,
@@ -61,18 +69,18 @@ _QUIZ_BODY = {
                     "properties": {
                         "topic_ids": {
                             "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": True,
-                            "items": {"type": "string", "format": "uuid"},
+                            "items": UUID, "description": "Deployment may configure a lower topic limit.",
                         },
-                        "count": {"type": "integer", "minimum": 1, "maximum": 10},
+                        "count": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Deployment may configure a lower question limit."},
                         "difficulty": {"type": "string", "enum": list(REQUEST_DIFFICULTIES)},
-                        "scope": {"type": "string", "enum": ["class_only"]},
+                        "scope": {"type": "string", "enum": ["class_only"], "default": "class_only"},
                     },
                 }
             }
         },
     },
     "parameters": [
-        {"name": "Idempotency-Key", "in": "header", "required": True, "schema": {"type": "string", "format": "uuid"}}
+        {"name": "Idempotency-Key", "in": "header", "required": True, "schema": UUID}
     ],
 }  # fmt: skip
 _ATTEMPT_BODY = {
@@ -85,8 +93,8 @@ _ATTEMPT_BODY = {
                     "required": sorted(ATTEMPT_KEYS),
                     "additionalProperties": False,
                     "properties": {
-                        "quiz_id": {"type": "string", "format": "uuid"},
-                        "question_id": {"type": "string", "format": "uuid"},
+                        "quiz_id": UUID,
+                        "question_id": UUID,
                         "answer": {"type": "string", "minLength": 1, "maxLength": MAX_ANSWER_CHARS},
                         "hint_count": {"type": "integer", "minimum": 0, "maximum": MAX_HINTS},
                         "response_ms": {"type": ["integer", "null"], "minimum": 0, "maximum": MAX_RESPONSE_MS},
@@ -192,8 +200,15 @@ async def _authorized_delivery(state, user: CurrentUser, course_id: uuid.UUID) -
 
 @router.post(
     "/courses/{course_id}/quizzes",
-    responses={**_ERRORS, 200: {"model": QuizResponse, "description": "Replay of an existing quiz"},
-               201: {"model": QuizResponse, "description": "Generated"}},
+    responses={**_ERRORS, **_WRITE_ERRORS, **{s: _GENERATION_ERROR for s in (502, 503, 504)},
+               409: {"description": "Key reused or quiz_generation_in_progress (with Retry-After).", "headers": RETRY_AFTER,
+                     "content": {"application/json": {"schema": {"oneOf": [
+                         exact(code=enum("idempotency_key_reused"), detail=STRING),
+                         exact(code=enum("quiz_generation_in_progress"), detail=STRING, quiz_id=UUID, status=enum("generating")),
+                     ]}}}},
+               429: {"model": ErrorBody, "headers": RETRY_AFTER},
+               200: {"model": QuizResponse, "description": "Replay of an existing quiz", "headers": {**LOCATION, **REPLAYED}},
+               201: {"model": QuizResponse, "description": "Generated", "headers": LOCATION}},
     summary="Generate a practice quiz (idempotent)",
     openapi_extra=_QUIZ_BODY,
     response_model=None,
@@ -237,7 +252,10 @@ async def read(course_id: uuid.UUID, quiz_id: uuid.UUID, request: Request, user:
 
 @router.post(
     "/courses/{course_id}/attempts",
-    responses={**_ERRORS, 200: {"model": AttemptResponse, "description": "Replay of the same answer"},
+    responses={**_ERRORS, **_WRITE_ERRORS,
+               409: {"description": "Already answered with a different choice.", "content": {"application/json": {
+                   "schema": exact(code=enum("already_answered"), detail=STRING, attempt_id=UUID)}}},
+               200: {"model": AttemptResponse, "description": "Replay of the same answer"},
                201: {"model": AttemptResponse, "description": "Graded"}},
     summary="Answer one question of a practice quiz (graded locally, idempotent per question)",
     openapi_extra=_ATTEMPT_BODY,

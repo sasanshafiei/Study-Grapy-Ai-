@@ -39,12 +39,26 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
-from .schema_checks import (  # shared verbatim with migration 0007
+from .schema_checks import (  # shared verbatim with migrations 0007 and 0008
+    AUDIT_SHAPE_CHECK,
+    BLUEPRINT_VALUES_CHECK,
+    EXAM_FIELDS_CHECK,
+    EXAM_FINGERPRINT_CHECK,
+    EXAM_ITEM_PURPOSE_CHECK,
+    EXAM_ITEM_VALUES_CHECK,
+    EXAM_STATE_CHECK,
+    EXAM_STATUS_CHECK,
+    IDEMPOTENCY_CHECK,
     MODEL_STATE_CHECK,
     OUTBOX_LIFECYCLE_CHECK,
     OUTBOX_STATUS_CHECK,
+    QUESTION_BANK_CHECK,
+    QUESTION_BLOOM_CHECK,
     RELEASE_PAYLOAD_CHECK,
     RELEASE_WEEK_CHECK,
+    REVISION_CONTENT_CHECK,
+    REVISION_DOMAIN_CHECK,
+    REVISION_PURPOSE_CHECK,
     SCORE_PROVENANCE_CHECK,
     STREAM_BATCH_CHECK,
     STREAM_COUNTERS_CHECK,
@@ -665,8 +679,42 @@ class ExternalDocumentVersion(Base):
 
 # --- The one index --------------------------------------------------------
 
+class IndexGeneration(Base):
+    __tablename__ = "index_generations"
+    __table_args__ = (
+        ForeignKeyConstraint(["document_id", "course_id"], ["documents.id", "documents.course_id"],
+                             name="index_generations_document_course_fkey", ondelete="CASCADE"),
+        UniqueConstraint("document_id", "course_id", "idempotency_key", name="index_generations_identity_key"),
+        CheckConstraint("section_count > 0 AND chunk_count >= section_count", name="counts"),
+        CheckConstraint("content_digest ~ '^[0-9a-f]{64}$' AND idempotency_key ~ '^[0-9a-f]{64}$'", name="hashes"),
+        CheckConstraint("model_name ~ '^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,99}$' AND "
+                        "model_version ~ '^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,99}$'", name="model"),
+    )
+
+    document_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    course_id: Mapped[uuid.UUID]
+    idempotency_key: Mapped[str] = mapped_column(String(64), unique=True)
+    content_digest: Mapped[str] = mapped_column(String(64))
+    section_count: Mapped[int]
+    chunk_count: Mapped[int]
+    model_name: Mapped[str] = mapped_column(String(100))
+    model_version: Mapped[str] = mapped_column(String(100))
+    committed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("clock_timestamp()"))
+
+
 class Chunk(Base):
     __tablename__ = "chunks"
+    __table_args__ = (
+        UniqueConstraint("id", "course_id"),
+        ForeignKeyConstraint(["document_id", "course_id", "generation_key"],
+                             ["index_generations.document_id", "index_generations.course_id",
+                              "index_generations.idempotency_key"], name="chunks_generation_fkey", ondelete="CASCADE"),
+        CheckConstraint("(generation_key IS NULL AND section_ordinal IS NULL) OR "
+                        "(generation_key IS NOT NULL AND course_id IS NOT NULL AND section_ordinal IS NOT NULL "
+                        "AND section_ordinal >= 0 AND embedding IS NOT NULL AND vector_norm(embedding) > 0 "
+                        "AND locator IS NOT NULL AND text ~ '[^[:space:]]')", name="generation"),
+        Index(None, "document_id", "generation_key"),
+    )
 
     id: Mapped[uuid.UUID] = pk()
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id"))
@@ -675,8 +723,8 @@ class Chunk(Base):
     text: Mapped[str] = mapped_column(Text)
     locator: Mapped[dict] = mapped_column(JSONB, nullable=True)  # {"page": 6} or {"heading": "4.4"}
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBED_DIM), nullable=True)
-    # A generated tsvector for sparse/keyword search is added via migration;
-    # keeping it out of the ORM keeps this file simple. See README.
+    generation_key: Mapped[str | None] = mapped_column(String(64))
+    section_ordinal: Mapped[int | None]
 
 
 class Topic(Base):
@@ -691,11 +739,18 @@ class Topic(Base):
 
 class ChunkTopic(Base):
     __tablename__ = "chunk_topics"
-    __table_args__ = (UniqueConstraint("chunk_id", "topic_id"),)
+    __table_args__ = (
+        UniqueConstraint("chunk_id", "topic_id"),
+        ForeignKeyConstraint(["chunk_id", "course_id"], ["chunks.id", "chunks.course_id"],
+                             name="chunk_topics_chunk_course_fkey", ondelete="CASCADE"),
+        ForeignKeyConstraint(["topic_id", "course_id"], ["topics.id", "topics.course_id"],
+                             name="chunk_topics_topic_course_fkey"),
+    )
 
     id: Mapped[uuid.UUID] = pk()
     chunk_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chunks.id"))
     topic_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("topics.id"))
+    course_id: Mapped[uuid.UUID | None]
 
 
 # --- Practice & learner model --------------------------------------------
@@ -780,7 +835,14 @@ class Question(Base):
 
     A generated question (generated_by_session_id set, status 'generated') carries complete
     metadata (questions_generated_check) and is immutable (database trigger); legacy and
-    non-generated questions (future M9 drafts) keep their old freedom.
+    non-generated questions keep their old freedom.
+
+    Revision 0008 (M9) added the professor question bank: `version IS NOT NULL` marks a bank
+    row (always purpose 'exam', status draft | approved | retired, questions_bank_check), with
+    the author, optimistic-concurrency version, last change and latest approved revision
+    (composite key to exam_question_revisions; use_alter: the tables reference each other).
+    Trigger questions_bank_guard keeps bank identity immutable, versions +1 per change, the
+    documented transitions and no DELETE. bloom_level is optional for any row.
     """
 
     __tablename__ = "questions"
@@ -822,6 +884,15 @@ class Question(Base):
             name="questions_generated_session_fkey",
         ),
         Index(None, "course_id", "purpose", "status"),
+        # --- revision 0008 (M9) ---
+        CheckConstraint(QUESTION_BLOOM_CHECK, name="bloom_level"),
+        CheckConstraint(QUESTION_BANK_CHECK, name="bank"),
+        ForeignKeyConstraint(
+            ["id", "approved_revision_no"],
+            ["exam_question_revisions.question_id", "exam_question_revisions.revision_no"],
+            name="questions_approved_revision_fkey",
+            use_alter=True,
+        ),
     )
 
     id: Mapped[uuid.UUID] = pk()
@@ -845,6 +916,12 @@ class Question(Base):
     generated_for_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     generation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # protocol, service, model, request_id
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # --- added by revision 0008 (M9 question bank; NULL for every legacy and M7 row) ---
+    version: Mapped[int | None] = mapped_column(Integer, nullable=True)  # the M9 marker; +1 per change
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)  # historical
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_revision_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bloom_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
 
 class QuizItem(Base):
@@ -1190,4 +1267,210 @@ class AnalyticsWeeklyRelease(Base):
     min_group_size: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+# --- Revision 0008 (M9): professor question bank, exams, blueprint, audit, idempotency --------------
+#
+# Lock order of every M9 transaction that takes several rows (app/exams/):
+#   users -> courses -> exams -> exam_blueprint_rows -> exam_items -> questions (ascending id)
+#   -> exam_question_revisions -> exam_idempotency_keys -> exam_audit_events (insert)
+# Bank-only operations take users -> courses -> questions -> ... and never lock an exam afterwards.
+
+
+class ExamQuestionRevision(Base):
+    """Immutable copy of a bank question's content at one approval (revision_no 1, 2, ... per question).
+
+    Inserted only as an exact copy of the current draft working copy (trigger, which also locks the
+    question FOR UPDATE and requires contiguous numbers); never updated or deleted. source_refs holds
+    frozen display data {document_id, locator, title, locator_label} read at approval.
+    """
+
+    __tablename__ = "exam_question_revisions"
+    __table_args__ = (
+        CheckConstraint(REVISION_PURPOSE_CHECK, name="purpose"),
+        CheckConstraint(REVISION_DOMAIN_CHECK, name="domain"),
+        CheckConstraint(REVISION_CONTENT_CHECK, name="content"),
+        ForeignKeyConstraint(
+            ["question_id", "course_id", "purpose"],
+            ["questions.id", "questions.course_id", "questions.purpose"],
+            name="exam_question_revisions_question_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["topic_id", "course_id"], ["topics.id", "topics.course_id"], name="exam_question_revisions_topic_fkey"
+        ),
+    )
+
+    question_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    revision_no: Mapped[int] = mapped_column(Integer, primary_key=True)
+    course_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'exam'::character varying"))
+    topic_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    qtype: Mapped[str] = mapped_column(String(20), nullable=False)
+    difficulty: Mapped[str] = mapped_column(String(20), nullable=False)
+    bloom_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    stem: Mapped[str] = mapped_column(Text, nullable=False)
+    choices: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    answer_key: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_refs: Mapped[list] = mapped_column(JSONB, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class Exam(Base):
+    """A professor's exam: draft (editable) -> finalized (immutable, exportable) -> archived; never deleted.
+
+    Finalization freezes the course header, totals, content hash and size, the blueprint decision and
+    the preview fingerprint it was accepted with; exams_guard verifies items, pinned revisions and the
+    blueprint in the database at that transition.
+    """
+
+    __tablename__ = "exams"
+    __table_args__ = (
+        CheckConstraint(EXAM_STATUS_CHECK, name="status"),
+        CheckConstraint(EXAM_FIELDS_CHECK, name="fields"),
+        CheckConstraint(EXAM_FINGERPRINT_CHECK, name="fingerprint"),
+        CheckConstraint(EXAM_STATE_CHECK, name="state"),
+        UniqueConstraint("id", "course_id"),
+        ForeignKeyConstraint(
+            ["derived_from_exam_id", "course_id"], ["exams.id", "exams.course_id"], name="exams_derived_from_fkey"
+        ),
+        Index(None, "course_id", "status", "updated_at", "id"),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"), nullable=False)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_minutes: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finalized_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    finalized_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    course_code_snapshot: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    course_name_snapshot: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    item_count: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    total_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    content_chars: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    blueprint_status: Mapped[str | None] = mapped_column(String(20), nullable=True)  # none | fulfilled | deviation_accepted
+    blueprint_deviation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finalize_preview_fingerprint: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    derived_from_exam_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ExamBlueprintRow(Base):
+    """One blueprint requirement of an exam (criteria NULL = any); writable only while the exam is a draft.
+
+    (exam_id, position) is unique DEFERRABLE INITIALLY DEFERRED so rows can be reordered in one
+    transaction; (id, exam_id) is a separate non-deferrable key, the target of exam_items' row key.
+    """
+
+    __tablename__ = "exam_blueprint_rows"
+    __table_args__ = (
+        CheckConstraint(BLUEPRINT_VALUES_CHECK, name="values"),
+        ForeignKeyConstraint(["exam_id", "course_id"], ["exams.id", "exams.course_id"], name="exam_blueprint_rows_exam_fkey"),
+        ForeignKeyConstraint(
+            ["topic_id", "course_id"], ["topics.id", "topics.course_id"], name="exam_blueprint_rows_topic_fkey"
+        ),
+        UniqueConstraint("id", "exam_id"),
+        UniqueConstraint(
+            "exam_id", "position", name="exam_blueprint_rows_exam_id_position_key", deferrable=True, initially="DEFERRED"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    exam_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    course_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    topic_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    qtype: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    difficulty: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    bloom_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    question_count: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    points_each: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+
+
+class ExamItem(Base):
+    """A bank question placed in an exam at a position with points; pinned to a revision at finalization."""
+
+    __tablename__ = "exam_items"
+    __table_args__ = (
+        CheckConstraint(EXAM_ITEM_PURPOSE_CHECK, name="purpose"),
+        CheckConstraint(EXAM_ITEM_VALUES_CHECK, name="values"),
+        ForeignKeyConstraint(["exam_id", "course_id"], ["exams.id", "exams.course_id"], name="exam_items_exam_fkey"),
+        ForeignKeyConstraint(
+            ["question_id", "course_id", "purpose"],
+            ["questions.id", "questions.course_id", "questions.purpose"],
+            name="exam_items_question_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["question_id", "question_revision_no"],
+            ["exam_question_revisions.question_id", "exam_question_revisions.revision_no"],
+            name="exam_items_revision_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["blueprint_row_id", "exam_id"],
+            ["exam_blueprint_rows.id", "exam_blueprint_rows.exam_id"],
+            name="exam_items_blueprint_row_fkey",
+        ),
+        UniqueConstraint("exam_id", "position", name="exam_items_exam_id_position_key", deferrable=True, initially="DEFERRED"),
+        UniqueConstraint("exam_id", "question_id"),
+        Index(None, "question_id"),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    exam_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    course_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    question_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'exam'::character varying"))
+    question_revision_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    points: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    blueprint_row_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ExamAuditEvent(Base):
+    """Append-only, course-scoped record of every M9 change and export: ids, hashes and counts only."""
+
+    __tablename__ = "exam_audit_events"
+    __table_args__ = (
+        CheckConstraint(AUDIT_SHAPE_CHECK, name="shape"),
+        Index("exam_audit_events_entity_idx", "course_id", "entity_kind", "entity_id", "created_at"),
+        Index("exam_audit_events_replay_idx", "entity_id", "action", "entity_version"),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"), nullable=False)
+    actor_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    entity_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)  # no FK: history survives
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    entity_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ExamIdempotencyKey(Base):
+    """The resource an M9 create (question, exam, duplicate) made for one user's Idempotency-Key."""
+
+    __tablename__ = "exam_idempotency_keys"
+    __table_args__ = (CheckConstraint(IDEMPOTENCY_CHECK, name="shape"),)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    idempotency_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    operation: Mapped[str] = mapped_column(String(30), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"), nullable=False)
+    resource_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

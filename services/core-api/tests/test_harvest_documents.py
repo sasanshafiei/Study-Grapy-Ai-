@@ -25,6 +25,7 @@ from app.ingestion import jobs
 from app.ingestion.jobs import CompletionStatus, RetryRefused
 from app.services.documents import list_documents
 from tests.api_support import DOCUMENT_ITEM_KEYS
+from tests.index_writer import persist as persist_index
 from tests.fake_ai_service import TOKEN, FakeAiService
 from tests.harvest_support import (
     PARAGRAPH,
@@ -235,7 +236,7 @@ def test_external_completion_fails_closed_while_inactive_and_retry_index_is_file
         session.commit()
         digest = request_for(session, v1["id"]).content_digest
     env.world.execute("UPDATE sources SET enabled = false WHERE id = :s", s=env.source)
-    assert jobs.complete_index(env.factory, claim, digest) is CompletionStatus.EXTERNAL_INACTIVE
+    assert jobs.complete_index(env.factory, claim, digest, 1) is CompletionStatus.EXTERNAL_INACTIVE
     assert env.versions()[0]["status"] == "failed"
     env.world.execute("UPDATE sources SET enabled = true WHERE id = :s", s=env.source)
     new_job = jobs.retry_index(env.factory, v1["id"])  # no parse job exists, none is invented
@@ -286,7 +287,7 @@ def test_a_pending_version_of_a_missing_page_is_never_indexed(env):
         session.commit()
         digest = request_for(session, v1["id"]).content_digest
     env.world.execute("UPDATE external_resources SET state = 'missing' WHERE page_id = 7 AND course_id = :c", c=env.course)
-    assert jobs.complete_index(env.factory, claim, digest) is CompletionStatus.SUPERSEDED
+    assert jobs.complete_index(env.factory, claim, digest, 1) is CompletionStatus.SUPERSEDED
     assert env.versions()[0]["status"] == "stale"
 
 
@@ -312,8 +313,8 @@ def test_class_indexing_marks_the_course_dirty_but_external_indexing_never_does(
 
 
 @pytest.fixture
-def fake():
-    service = FakeAiService().start()
+def fake(world):
+    service = FakeAiService(persist=lambda body: persist_index(world.engine, body)).start()
     yield service
     service.stop()
 
@@ -456,3 +457,23 @@ def test_a_superseded_failed_version_holds_no_content_but_the_current_failed_one
     assert env.persist(7, 50, extra=" Revised.") is Outcome.NEW_VERSION  # Y; the failed X is superseded
     assert _orphaned(env, 8)  # nothing holds X any more
     assert env.persist(9, 90) is Outcome.ACCEPTED  # a third resource with content X is harvested
+
+
+def test_provider_retrieval_switches_external_versions_and_honours_source_disable(env):
+    env.persist(7, 42)
+    first = env.versions()[0]["id"]
+    sql = "SELECT DISTINCT document_id FROM retrieve_index_chunks(:course, ARRAY['external'])"
+    def documents():
+        return [r["document_id"] for r in env.world.rows(sql, course=env.course)]
+    assert documents() == []
+    assert index_now(env.factory, env.world, first) is CompletionStatus.COMPLETED
+    assert documents() == [first]
+    env.persist(7, 51, extra=" A different version.")
+    second = env.versions()[1]["id"]
+    assert documents() == [first]
+    assert index_now(env.factory, env.world, second) is CompletionStatus.COMPLETED
+    assert documents() == [second]
+    env.world.execute("UPDATE harvest_course_settings SET enabled=false WHERE course_id=:id", id=env.course)
+    assert documents() == [second]
+    env.world.execute("UPDATE sources SET enabled=false WHERE id=:id", id=env.source)
+    assert documents() == []

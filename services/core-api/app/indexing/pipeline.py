@@ -6,7 +6,7 @@
     -> build the canonical request from the stored metadata and sections
     -> POST it (bounded HTTP client) with its content-based idempotency key
     -> confirmed 200 only -> complete (one transaction, fenced by the token,
-       content digest re-verified against what is stored now) -> document indexed
+       current content digest, committed generation and chunk evidence verified) -> document indexed
 
 Failure classes (docs/ai-indexing-integration.md):
 
@@ -228,7 +228,12 @@ def _attempt(claim: Claim, ctx: IndexContext, max_bytes: int, locators=frozenset
         log.info(
             "index_confirmed job_id=%s chunks=%s replayed=%s", claim.job_id, result.chunk_count, result.replayed
         )
-        return jobs.complete_index(ctx.session_factory, claim, request.content_digest)
+        status = jobs.complete_index(ctx.session_factory, claim, request.content_digest, result.chunk_count)
+        if status is CompletionStatus.ROUTING_CHANGED:
+            raise _AttemptFailed(Failure(status.value, "document routing changed during completion", permanent=False))
+        if status is CompletionStatus.PROOF_MISSING:
+            raise _AttemptFailed(Failure("index_proof_missing", "committed generation does not match receipt", permanent=False))
+        return status
     if result.outcome is Outcome.ACCEPTED:
         raise _AttemptFailed(ctx.completion.on_accepted(claim, request, result))
     if result.outcome is Outcome.REJECTED:

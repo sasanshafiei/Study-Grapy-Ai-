@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from ..auth import CurrentUser, get_current_user
@@ -29,6 +29,7 @@ from ..chat.stream import ChatJob, ChatStream, run_chat
 from ..errors import ApiError
 from ..json_body import read_json_object, require_keys
 from ..schemas.documents import ErrorBody
+from ..schemas.openapi import BEARER, RETRY_AFTER, enum, header, validation_error
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
@@ -46,8 +47,9 @@ _DOC = {
                     "required": ["question", "scope"],
                     "additionalProperties": False,
                     "properties": {
-                        "question": {"type": "string", "minLength": 1},
-                        "scope": {"type": "string", "enum": list(SCOPES)},
+                        "question": {"type": "string", "minLength": 1, "description": "Trimmed text. Limit defaults to 2000 characters."},
+                        "scope": {"type": "string", "enum": [scope for scope in SCOPES if scope not in UNAVAILABLE_SCOPES],
+                                  "description": "Availability depends on enabled course chat scopes."},
                     },
                 }
             }
@@ -55,7 +57,14 @@ _DOC = {
     },
     "responses": {
         "200": {
-            "description": "Server-sent events: token*, then done (the message) or one error event.",
+            "description": (
+                "UTF-8 server-sent events. Ignore comment lines. Each data field is JSON. "
+                "A token carries {text}. The terminal done carries id, role, text, citations, grounded, "
+                "used_web, scope, topic_ids and created_at. A terminal error carries {message, code}. "
+                "After the stream opens an error is an event within the HTTP 200 response."
+            ),
+            "headers": {"Cache-Control": header("Stream cache policy.", enum("no-store")),
+                        "X-Accel-Buffering": header("Disable proxy buffering.", enum("no"))},
             "content": {"text/event-stream": {"schema": {"type": "string"}}},
         }
     },
@@ -90,7 +99,9 @@ def validate_scope(value: object, enabled: frozenset[str]) -> str:
 
 @router.post(
     "/courses/{course_id}/chat",
-    responses=_ERRORS,
+    response_class=Response,
+    responses={**_ERRORS, 401: {"model": ErrorBody, "headers": BEARER}, 422: validation_error(),
+               429: {"model": ErrorBody, "headers": RETRY_AFTER}, 500: {"model": ErrorBody}},
     summary="Ask a question about a course (validated server-sent events)",
     openapi_extra=_DOC,
     response_model=None,

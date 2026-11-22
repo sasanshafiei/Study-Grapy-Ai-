@@ -1,49 +1,992 @@
-openapi: 3.0.3
+openapi: 3.1.0
 info:
-  title: StudyGraph AI Service (internal contract)
-  version: 0.1.0
-  description: >
-    The boundary between the CE team (core-api) and the AI team (ai-service).
-    This file is the source of truth. Changing it needs sign-off from one CE
-    and one AI member. The CE side builds against the mock in
-    services/ai-service until the real handlers land.
-
+  title: StudyGraph internal AI provider API
+  version: 1.0.0-rc.1
+  description: PROPOSED CE-1 first release, pending CE and AI sign-off. Four CE adapter profiles. Fixtures are for development;
+    mock:true never satisfies production readiness. Index activation additionally requires F03 database proof. See docs/ai-provider-handoff.md
+    for transaction, scope and verification rules. Send UTF-8 JSON with unique member names and finite numbers. Encode integer
+    fields as JSON integer tokens. Replies require application/json, identity encoding and exactly one Content-Length equal
+    to the body byte count. Redirects and streaming transfer are unsupported.
 servers:
-  - url: http://ai-service:8000/ai/v1
-
+- {url: 'http://ai-service:8000'}
+security:
+- ServiceBearer: []
 paths:
-  /index/documents:
+  /ai/v1/index/capabilities:
+    get:
+      operationId: indexCapabilities
+      tags: [Index]
+      summary: Probe index provider readiness
+      description: Authenticated readiness probe. CE requires a compatible non-mock profile and caches positive and negative
+        results.
+      parameters:
+      - in: header
+        name: X-StudyGraph-Protocol
+        required: true
+        schema: {const: studygraph.index/1}
+      responses:
+        '200':
+          description: Provider capabilities.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IndexCapabilities'}
+          headers:
+            Content-Length: {$ref: '#/components/headers/ContentLength'}
+        '400': {$ref: '#/components/responses/Error400'}
+        '401': {$ref: '#/components/responses/Error401'}
+        '403': {$ref: '#/components/responses/Error403'}
+        '422': {$ref: '#/components/responses/Error422'}
+        '429': {$ref: '#/components/responses/Error429'}
+        '500': {$ref: '#/components/responses/Error500'}
+        '503': {$ref: '#/components/responses/Error503'}
+  /ai/v1/index/documents:
     post:
-      summary: Chunk, embed and topic-tag a document (job)
-      description: Owner AI-1. Returns 202 + job_id for large docs in the real version.
-  /topics/extract:
+      operationId: indexDocuments
+      tags: [Index]
+      summary: Commit or replay one document generation
+      description: Post the exact content-based key in the header and body. Return 200 only after the complete single generation
+        commits. Compare-and-replay the original identity and counts, never replace a different key. 202 is unconfirmed. CE
+        retains publication authority; production indexing is blocked pending F03.
+      parameters:
+      - in: header
+        name: X-StudyGraph-Protocol
+        required: true
+        schema: {const: studygraph.index/1}
+      - in: header
+        name: Idempotency-Key
+        required: true
+        schema: {$ref: '#/components/schemas/Sha256'}
+      responses:
+        '200':
+          description: Completed JSON response.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - {$ref: '#/components/schemas/IndexReceipt'}
+                - {$ref: '#/components/schemas/IndexFixtureReceipt'}
+          headers:
+            Content-Length: {$ref: '#/components/headers/ContentLength'}
+        '400': {$ref: '#/components/responses/Error400'}
+        '401': {$ref: '#/components/responses/Error401'}
+        '403': {$ref: '#/components/responses/Error403'}
+        '408': {$ref: '#/components/responses/Error408'}
+        '409': {$ref: '#/components/responses/Error409'}
+        '413': {$ref: '#/components/responses/Error413'}
+        '415': {$ref: '#/components/responses/Error415'}
+        '422': {$ref: '#/components/responses/Error422'}
+        '425': {$ref: '#/components/responses/Error425'}
+        '429': {$ref: '#/components/responses/Error429'}
+        '500': {$ref: '#/components/responses/Error500'}
+        '503': {$ref: '#/components/responses/Error503'}
+        '504': {$ref: '#/components/responses/Error504'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/IndexRequest'}
+  /ai/v1/chat/capabilities:
+    get:
+      operationId: chatCapabilities
+      tags: [Chat]
+      summary: Probe chat provider readiness
+      description: Authenticated readiness probe. CE requires a compatible non-mock profile and caches positive and negative
+        results.
+      parameters:
+      - in: header
+        name: X-StudyGraph-Protocol
+        required: true
+        schema: {const: studygraph.chat/1}
+      responses:
+        '200':
+          description: Provider capabilities.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChatCapabilities'}
+          headers:
+            Content-Length: {$ref: '#/components/headers/ContentLength'}
+        '400': {$ref: '#/components/responses/Error400'}
+        '401': {$ref: '#/components/responses/Error401'}
+        '403': {$ref: '#/components/responses/Error403'}
+        '422': {$ref: '#/components/responses/Error422'}
+        '429': {$ref: '#/components/responses/Error429'}
+        '500': {$ref: '#/components/responses/Error500'}
+        '503': {$ref: '#/components/responses/Error503'}
+  /ai/v1/chat/answer:
     post:
-      summary: Extract a topic map and search queries for a course (job)
-      description: Owner AI-2. Feeds the external harvester.
-  /chat/answer:
+      operationId: chatAnswer
+      tags: [Chat]
+      summary: Answer a course-scoped question
+      description: One bounded JSON answer per call. Echo request identity and scope. Mark every grounded claim with the matching
+        numbered citation and copy verbatim evidence. CE rechecks access and citations before public SSE. No automatic retry.
+      parameters:
+      - in: header
+        name: X-StudyGraph-Protocol
+        required: true
+        schema: {const: studygraph.chat/1}
+      responses:
+        '200':
+          description: Completed JSON response.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChatAnswer'}
+          headers:
+            Content-Length: {$ref: '#/components/headers/ContentLength'}
+        '400': {$ref: '#/components/responses/Error400'}
+        '401': {$ref: '#/components/responses/Error401'}
+        '403': {$ref: '#/components/responses/Error403'}
+        '408': {$ref: '#/components/responses/Error408'}
+        '409': {$ref: '#/components/responses/Error409'}
+        '413': {$ref: '#/components/responses/Error413'}
+        '415': {$ref: '#/components/responses/Error415'}
+        '422': {$ref: '#/components/responses/Error422'}
+        '425': {$ref: '#/components/responses/Error425'}
+        '429': {$ref: '#/components/responses/Error429'}
+        '500': {$ref: '#/components/responses/Error500'}
+        '503': {$ref: '#/components/responses/Error503'}
+        '504': {$ref: '#/components/responses/Error504'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ChatRequest'}
+  /ai/v1/quiz/capabilities:
+    get:
+      operationId: quizCapabilities
+      tags: [Quiz]
+      summary: Probe quiz provider readiness
+      description: Authenticated readiness probe. CE requires a compatible non-mock profile and caches positive and negative
+        results.
+      parameters:
+      - in: header
+        name: X-StudyGraph-Protocol
+        required: true
+        schema: {const: studygraph.quiz/1}
+      responses:
+        '200':
+          description: Provider capabilities.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/QuizCapabilities'}
+          headers:
+            Content-Length: {$ref: '#/components/headers/ContentLength'}
+        '400': {$ref: '#/components/responses/Error400'}
+        '401': {$ref: '#/components/responses/Error401'}
+        '403': {$ref: '#/components/responses/Error403'}
+        '422': {$ref: '#/components/responses/Error422'}
+        '429': {$ref: '#/components/responses/Error429'}
+        '500': {$ref: '#/components/responses/Error500'}
+        '503': {$ref: '#/components/responses/Error503'}
+  /ai/v1/quiz/generate:
     post:
-      summary: Answer a question over class + external sources, with citations (stream)
-      description: Owner AI-1. See the example payload in docs / the plan.
-  /quiz/generate:
+      operationId: quizGenerate
+      tags: [Quiz]
+      summary: Generate a private practice quiz
+      description: Generate exactly count distinct questions for the requested topics, difficulty and negotiated types. MCQ
+        answer is a zero-based index within choices. Evidence must survive course and indexed-source checks. CE sends once
+        per reserved quiz UUID and owns keys and grading.
+      parameters:
+      - in: header
+        name: X-StudyGraph-Protocol
+        required: true
+        schema: {const: studygraph.quiz/1}
+      responses:
+        '200':
+          description: Completed JSON response.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/QuizResult'}
+          headers:
+            Content-Length: {$ref: '#/components/headers/ContentLength'}
+        '400': {$ref: '#/components/responses/Error400'}
+        '401': {$ref: '#/components/responses/Error401'}
+        '403': {$ref: '#/components/responses/Error403'}
+        '408': {$ref: '#/components/responses/Error408'}
+        '409': {$ref: '#/components/responses/Error409'}
+        '413': {$ref: '#/components/responses/Error413'}
+        '415': {$ref: '#/components/responses/Error415'}
+        '422': {$ref: '#/components/responses/Error422'}
+        '425': {$ref: '#/components/responses/Error425'}
+        '429': {$ref: '#/components/responses/Error429'}
+        '500': {$ref: '#/components/responses/Error500'}
+        '503': {$ref: '#/components/responses/Error503'}
+        '504': {$ref: '#/components/responses/Error504'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/QuizRequest'}
+  /ai/v1/mastery/capabilities:
+    get:
+      operationId: masteryCapabilities
+      tags: [Mastery]
+      summary: Probe mastery provider readiness
+      description: Authenticated readiness probe. CE requires a compatible non-mock profile and caches positive and negative
+        results.
+      parameters:
+      - in: header
+        name: X-StudyGraph-Protocol
+        required: true
+        schema: {const: studygraph.mastery/1}
+      responses:
+        '200':
+          description: Provider capabilities.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MasteryCapabilities'}
+          headers:
+            Content-Length: {$ref: '#/components/headers/ContentLength'}
+        '400': {$ref: '#/components/responses/Error400'}
+        '401': {$ref: '#/components/responses/Error401'}
+        '403': {$ref: '#/components/responses/Error403'}
+        '422': {$ref: '#/components/responses/Error422'}
+        '429': {$ref: '#/components/responses/Error429'}
+        '500': {$ref: '#/components/responses/Error500'}
+        '503': {$ref: '#/components/responses/Error503'}
+  /ai/v1/mastery/update:
     post:
-      summary: Generate quiz questions from retrieved chunks (job)
-      description: Owner AI-1.
-  /exam/generate:
-    post:
-      summary: Generate exam questions from a blueprint, class-only scope (job)
-      description: Owner AI-1, quality flags by AI-2.
-  /mastery/update:
-    post:
-      summary: Update per-topic mastery from new attempts (sync)
-      description: Owner AI-2.
-  /recommendations:
-    post:
-      summary: Rank what the student should study next (sync)
-      description: Owner AI-2.
-  /analytics/refresh:
-    post:
-      summary: Recompute class + item statistics (job, nightly)
-      description: Owner AI-2.
-
-# The one call in the other direction lives on core-api, not here:
-#   POST /internal/web/search   (owner CE-1) — live web fallback, Lane B.
+      operationId: masteryUpdate
+      tags: [Mastery]
+      summary: Apply a sequenced batch of practice events
+      description: Echo frozen batch identity, pseudonyms and pinned epoch/model. Apply each event once per epoch/learner,
+        maintain gapless per-topic order, and partition all event IDs between applied and duplicate. Return one score per
+        topic at its last submitted sequence. Replay an unchanged batch after loss.
+      parameters:
+      - in: header
+        name: X-StudyGraph-Protocol
+        required: true
+        schema: {const: studygraph.mastery/1}
+      responses:
+        '200':
+          description: Completed JSON response.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MasteryResult'}
+          headers:
+            Content-Length: {$ref: '#/components/headers/ContentLength'}
+        '400': {$ref: '#/components/responses/Error400'}
+        '401': {$ref: '#/components/responses/Error401'}
+        '403': {$ref: '#/components/responses/Error403'}
+        '408': {$ref: '#/components/responses/Error408'}
+        '409': {$ref: '#/components/responses/Error409'}
+        '413': {$ref: '#/components/responses/Error413'}
+        '415': {$ref: '#/components/responses/Error415'}
+        '422': {$ref: '#/components/responses/Error422'}
+        '425': {$ref: '#/components/responses/Error425'}
+        '429': {$ref: '#/components/responses/Error429'}
+        '500': {$ref: '#/components/responses/Error500'}
+        '503': {$ref: '#/components/responses/Error503'}
+        '504': {$ref: '#/components/responses/Error504'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MasteryRequest'}
+components:
+  securitySchemes:
+    ServiceBearer: {type: http, scheme: bearer, description: 'Internal AI_SERVICE_TOKEN, at least 32 characters. End-user
+        identity remains within CE.'}
+  responses:
+    Error400:
+      description: Malformed request, protocol mismatch, or inconsistent identity headers.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error401:
+      description: Missing or invalid internal service credential.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error403:
+      description: Authenticated caller is not authorized.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error408:
+      description: Request timed out.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error409:
+      description: Conflicting generation or intent. Only an in-progress duplicate is retryable.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error413:
+      description: Payload exceeds negotiated limits.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error415:
+      description: Unsupported representation.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error422:
+      description: Invalid typed payload or unsupported input.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error425:
+      description: Request cannot complete yet.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error429:
+      description: Provider capacity exceeded.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error500:
+      description: Provider failed.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error503:
+      description: Provider unavailable.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+    Error504:
+      description: Provider deadline exceeded.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Content-Length: {$ref: '#/components/headers/ContentLength'}
+  schemas:
+    Uuid: {type: string, format: uuid, pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', maxLength: 36}
+    Sha256: {type: string, pattern: '^[0-9a-f]{64}$', minLength: 64, maxLength: 64}
+    Timestamp: {type: string, format: date-time, pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$'}
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, retryable]
+          properties:
+            code: {type: string, pattern: '^[a-z][a-z0-9_]{0,63}$'}
+            message: {type: string}
+            retryable: {type: boolean}
+    IndexCapabilities:
+      type: object
+      additionalProperties: false
+      required: [protocol, service, mock, completion, max_request_bytes]
+      properties:
+        protocol: {const: studygraph.index/1}
+        service: {const: ai-service}
+        mock:
+          type: boolean
+          description: 'Real provider: false. The shipped fixture service always returns true. CE refuses mock providers.'
+        completion:
+          type: array
+          items: {type: string, minLength: 1}
+          contains: {const: sync}
+        max_request_bytes: {type: integer, minimum: 1}
+        locators:
+          type: array
+          items:
+            type: string
+            enum: [page, section]
+          minItems: 1
+          maxItems: 2
+          uniqueItems: true
+          contains: {const: page}
+          description: Omission means page-only. Send section documents only when negotiated.
+    ChatCapabilities:
+      type: object
+      additionalProperties: false
+      required: [protocol, service, mock, scopes, max_question_chars]
+      properties:
+        protocol: {const: studygraph.chat/1}
+        service: {const: ai-service}
+        mock:
+          type: boolean
+          description: 'Real provider: false. The shipped fixture service always returns true. CE refuses mock providers.'
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [class_only, class_plus_external, class_plus_web]
+          maxItems: 3
+          uniqueItems: true
+        max_question_chars: {type: integer, minimum: 1}
+    QuizCapabilities:
+      type: object
+      additionalProperties: false
+      required: [protocol, service, mock, scopes, question_types, max_questions, max_topics]
+      properties:
+        protocol: {const: studygraph.quiz/1}
+        service: {const: ai-service}
+        mock:
+          type: boolean
+          description: 'Real provider: false. The shipped fixture service always returns true. CE refuses mock providers.'
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [class_only, class_plus_external, class_plus_web]
+          maxItems: 3
+          uniqueItems: true
+        question_types:
+          type: array
+          items:
+            type: string
+            enum: [mcq, true_false, short]
+          maxItems: 3
+          uniqueItems: true
+        max_questions: {type: integer, minimum: 1}
+        max_topics: {type: integer, minimum: 1}
+    MasteryModel:
+      type: object
+      additionalProperties: false
+      required: [name, version]
+      properties:
+        name: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,99}$'}
+        version: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,99}$'}
+    MasteryCapabilities:
+      type: object
+      additionalProperties: false
+      required: [protocol, service, mock, model, state_epoch, max_events, ordering]
+      properties:
+        protocol: {const: studygraph.mastery/1}
+        service: {type: string, pattern: '^[a-z][a-z0-9-]{0,39}$', description: Stable service label. CE pins model and state
+            epoch.}
+        mock:
+          type: boolean
+          description: 'Real provider: false. The shipped fixture service always returns true. CE refuses mock providers.'
+        model: {$ref: '#/components/schemas/MasteryModel'}
+        state_epoch: {$ref: '#/components/schemas/Uuid'}
+        max_events: {type: integer, minimum: 1, maximum: 1000}
+        ordering: {const: per_topic}
+    PageDocument:
+      type: object
+      additionalProperties: false
+      required: [id, course_id, origin, kind, title, url, licence, language, source_sha256, page_count]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        course_id: {$ref: '#/components/schemas/Uuid'}
+        origin:
+          type: string
+          enum: [class, external, web_cache]
+        kind:
+          anyOf:
+          - {type: string, maxLength: 20}
+          - {type: 'null'}
+        title: {type: string, minLength: 1, maxLength: 255, pattern: \S}
+        url:
+          anyOf:
+          - {type: string, maxLength: 4096}
+          - {type: 'null'}
+        licence:
+          anyOf:
+          - {type: string, maxLength: 100}
+          - {type: 'null'}
+        language: {type: string, minLength: 1, maxLength: 10}
+        source_sha256:
+          anyOf:
+          - {$ref: '#/components/schemas/Sha256'}
+          - {type: 'null'}
+        page_count:
+          anyOf:
+          - {type: integer, minimum: 1, maximum: 2147483647}
+          - {type: 'null'}
+    ExternalAttribution:
+      type: object
+      additionalProperties: false
+      required: [provider, page_id, revision_id, revision_url, canonical_url, licence_url, attribution]
+      properties:
+        provider: {type: string, minLength: 1, maxLength: 4096}
+        page_id: {type: integer, minimum: 1}
+        revision_id: {type: integer, minimum: 1}
+        revision_url: {type: string, minLength: 1, maxLength: 4096}
+        canonical_url: {type: string, minLength: 1, maxLength: 4096}
+        licence_url: {type: string, minLength: 1, maxLength: 4096}
+        attribution: {type: string, minLength: 1, maxLength: 4096}
+    SectionDocument:
+      type: object
+      additionalProperties: false
+      required: [id, course_id, origin, kind, title, url, licence, language, source_sha256, page_count, locator_scheme, attribution]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        course_id: {$ref: '#/components/schemas/Uuid'}
+        origin: {const: external}
+        kind:
+          anyOf:
+          - {type: string, maxLength: 20}
+          - {type: 'null'}
+        title: {type: string, minLength: 1, maxLength: 255, pattern: \S}
+        url:
+          anyOf:
+          - {type: string, maxLength: 4096}
+          - {type: 'null'}
+        licence:
+          anyOf:
+          - {type: string, maxLength: 100}
+          - {type: 'null'}
+        language: {type: string, minLength: 1, maxLength: 10}
+        source_sha256:
+          anyOf:
+          - {$ref: '#/components/schemas/Sha256'}
+          - {type: 'null'}
+        page_count: {type: 'null'}
+        locator_scheme: {const: section}
+        attribution: {$ref: '#/components/schemas/ExternalAttribution'}
+    PageSection:
+      type: object
+      additionalProperties: false
+      required: [ordinal, locator, text]
+      properties:
+        ordinal: {type: integer, minimum: 0}
+        locator:
+          type: object
+          additionalProperties: false
+          required: [page]
+          properties:
+            page: {type: integer, minimum: 1, maximum: 2147483647}
+        text: {type: string, minLength: 1, pattern: \S}
+    HeadingSection:
+      type: object
+      additionalProperties: false
+      required: [ordinal, locator, text]
+      properties:
+        ordinal: {type: integer, minimum: 0}
+        locator:
+          oneOf:
+          - type: object
+            additionalProperties: false
+            required: [level, anchor, heading]
+            properties:
+              level: {const: 0}
+              anchor: {type: 'null'}
+              heading: {type: 'null'}
+          - type: object
+            additionalProperties: false
+            required: [level, anchor, heading]
+            properties:
+              level: {type: integer, minimum: 2, maximum: 6}
+              anchor: {type: string, minLength: 1, maxLength: 255}
+              heading: {type: string, minLength: 1, maxLength: 255}
+        text: {type: string, minLength: 1, pattern: \S}
+    IndexRequest:
+      description: Canonical UTF-8 JSON with sorted keys and compact separators. Ordinals start at zero with no gaps. Page
+        numbers strictly increase within page_count. Only the first heading section may have level zero. See the handoff for
+        both digest algorithms.
+      oneOf:
+      - type: object
+        additionalProperties: false
+        required: [protocol, document, sections, content_digest, idempotency_key]
+        properties:
+          protocol: {const: studygraph.index/1}
+          document: {$ref: '#/components/schemas/PageDocument'}
+          sections:
+            type: array
+            items: {$ref: '#/components/schemas/PageSection'}
+            minItems: 1
+          content_digest: {$ref: '#/components/schemas/Sha256'}
+          idempotency_key: {$ref: '#/components/schemas/Sha256'}
+      - type: object
+        additionalProperties: false
+        required: [protocol, document, sections, content_digest, idempotency_key]
+        properties:
+          protocol: {const: studygraph.index/1}
+          document: {$ref: '#/components/schemas/SectionDocument'}
+          sections:
+            type: array
+            items: {$ref: '#/components/schemas/HeadingSection'}
+            minItems: 1
+          content_digest: {$ref: '#/components/schemas/Sha256'}
+          idempotency_key: {$ref: '#/components/schemas/Sha256'}
+    IndexReceipt:
+      type: object
+      additionalProperties: false
+      required: [protocol, status, document_id, course_id, content_digest, idempotency_key, section_count, chunk_count, replayed]
+      properties:
+        protocol: {const: studygraph.index/1}
+        status: {const: indexed}
+        document_id: {$ref: '#/components/schemas/Uuid'}
+        course_id: {$ref: '#/components/schemas/Uuid'}
+        content_digest: {$ref: '#/components/schemas/Sha256'}
+        idempotency_key: {$ref: '#/components/schemas/Sha256'}
+        section_count: {type: integer, minimum: 1}
+        chunk_count: {type: integer, minimum: 1}
+        replayed: {type: boolean}
+    IndexFixtureReceipt:
+      description: Demonstration only. Extra mock:true makes this invalid as a production receipt even after a previously
+        successful readiness probe.
+      type: object
+      additionalProperties: false
+      required: [protocol, status, document_id, course_id, content_digest, idempotency_key, section_count, chunk_count, replayed,
+        mock]
+      properties:
+        protocol: {const: studygraph.index/1}
+        status: {const: indexed}
+        document_id: {$ref: '#/components/schemas/Uuid'}
+        course_id: {$ref: '#/components/schemas/Uuid'}
+        content_digest: {$ref: '#/components/schemas/Sha256'}
+        idempotency_key: {$ref: '#/components/schemas/Sha256'}
+        section_count: {type: integer, minimum: 1}
+        chunk_count: {type: integer, minimum: 1}
+        replayed: {type: boolean}
+        mock: {const: true}
+    ChatRequest:
+      type: object
+      additionalProperties: false
+      required: [protocol, request_id, course_id, scope, allowed_origins, question, max_citations, max_answer_chars]
+      properties:
+        protocol: {const: studygraph.chat/1}
+        request_id: {$ref: '#/components/schemas/Uuid'}
+        course_id: {$ref: '#/components/schemas/Uuid'}
+        scope:
+          type: string
+          enum: [class_only, class_plus_external]
+        allowed_origins:
+          type: array
+          items:
+            type: string
+            enum: [class, external]
+          minItems: 1
+          maxItems: 2
+          uniqueItems: true
+        question: {type: string, minLength: 1, maxLength: 20000}
+        max_citations: {type: integer, minimum: 1, maximum: 64}
+        max_answer_chars: {type: integer, minimum: 100, maximum: 100000}
+      allOf:
+      - if:
+          properties:
+            scope: {const: class_only}
+        then:
+          properties:
+            allowed_origins:
+              const: [class]
+        else:
+          properties:
+            allowed_origins:
+              const: [class, external]
+    ChatCitation:
+      type: object
+      additionalProperties: false
+      required: [marker, chunk_id, document_id, origin, quote]
+      properties:
+        marker: {type: integer, minimum: 1, maximum: 64}
+        chunk_id: {$ref: '#/components/schemas/Uuid'}
+        document_id: {$ref: '#/components/schemas/Uuid'}
+        origin:
+          type: string
+          enum: [class, external]
+        quote: {type: string, minLength: 1, maxLength: 500}
+    ChatAnswer:
+      type: object
+      additionalProperties: false
+      required: [protocol, request_id, course_id, scope, mock, grounded, answer, citations, topic_ids, used_web]
+      properties:
+        protocol: {const: studygraph.chat/1}
+        request_id: {$ref: '#/components/schemas/Uuid'}
+        course_id: {$ref: '#/components/schemas/Uuid'}
+        scope:
+          type: string
+          enum: [class_only, class_plus_external]
+        mock:
+          type: boolean
+          description: 'Real provider: false. The shipped fixture service always returns true. CE refuses mock providers.'
+        grounded: {type: boolean}
+        answer: {type: string}
+        citations:
+          type: array
+          items: {$ref: '#/components/schemas/ChatCitation'}
+          maxItems: 64
+        topic_ids:
+          type: array
+          items: {$ref: '#/components/schemas/Uuid'}
+          maxItems: 256
+          uniqueItems: true
+        used_web: {const: false}
+      allOf:
+      - if:
+          properties:
+            grounded: {const: false}
+        then:
+          properties:
+            citations: {maxItems: 0}
+        else:
+          properties:
+            citations: {minItems: 1}
+            answer: {minLength: 1}
+    QuizLimits:
+      type: object
+      additionalProperties: false
+      required: [max_stem_chars, max_hint_chars, max_explanation_chars, min_choices, max_choices, max_choice_chars, min_citations,
+        max_citations, max_quote_chars]
+      properties:
+        max_stem_chars: {const: 1000}
+        max_hint_chars: {const: 300}
+        max_explanation_chars: {const: 2000}
+        min_choices: {const: 2}
+        max_choices: {const: 6}
+        max_choice_chars: {const: 300}
+        min_citations: {const: 1}
+        max_citations: {const: 4}
+        max_quote_chars: {const: 500}
+    QuizRequest:
+      type: object
+      additionalProperties: false
+      required: [protocol, request_id, course_id, scope, allowed_origins, topics, count, difficulty, question_types, limits]
+      properties:
+        protocol: {const: studygraph.quiz/1}
+        request_id: {$ref: '#/components/schemas/Uuid'}
+        course_id: {$ref: '#/components/schemas/Uuid'}
+        scope: {const: class_only}
+        allowed_origins:
+          const: [class]
+        topics:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [topic_id, name]
+            properties:
+              topic_id: {$ref: '#/components/schemas/Uuid'}
+              name: {type: string, maxLength: 150}
+          minItems: 1
+          maxItems: 5
+          uniqueItems: true
+        count: {type: integer, minimum: 1, maximum: 10}
+        difficulty:
+          type: string
+          enum: [easy, medium, hard, mixed]
+        question_types:
+          type: array
+          items:
+            type: string
+            enum: [mcq, true_false]
+          minItems: 1
+          maxItems: 2
+          uniqueItems: true
+        limits: {$ref: '#/components/schemas/QuizLimits'}
+    QuizCitation:
+      type: object
+      additionalProperties: false
+      required: [chunk_id, document_id, origin, locator, quote]
+      properties:
+        chunk_id: {$ref: '#/components/schemas/Uuid'}
+        document_id: {$ref: '#/components/schemas/Uuid'}
+        origin: {const: class}
+        locator:
+          oneOf:
+          - type: object
+            additionalProperties: false
+            required: [page]
+            properties:
+              page: {type: integer, minimum: 1, maximum: 2147483647}
+          - type: object
+            additionalProperties: false
+            required: [slide]
+            properties:
+              slide: {type: integer, minimum: 1, maximum: 2147483647}
+          - type: object
+            additionalProperties: false
+            required: [section]
+            properties:
+              section: {type: string, minLength: 1, maxLength: 40}
+          - type: object
+            additionalProperties: false
+            required: [heading]
+            properties:
+              heading: {type: string, minLength: 1, maxLength: 40}
+        quote: {type: string, minLength: 1, maxLength: 500}
+    Mcq:
+      type: object
+      additionalProperties: false
+      required: [topic_id, difficulty, stem, hint, explanation, citations, type, choices, answer]
+      properties:
+        topic_id: {$ref: '#/components/schemas/Uuid'}
+        difficulty:
+          type: string
+          enum: [easy, medium, hard]
+        stem: {type: string, minLength: 1, maxLength: 1000}
+        hint: {type: string, minLength: 1, maxLength: 300}
+        explanation: {type: string, minLength: 1, maxLength: 2000}
+        citations:
+          type: array
+          items: {$ref: '#/components/schemas/QuizCitation'}
+          minItems: 1
+          maxItems: 4
+          uniqueItems: true
+        type: {const: mcq}
+        choices:
+          type: array
+          items: {type: string, minLength: 1, maxLength: 300}
+          minItems: 2
+          maxItems: 6
+          uniqueItems: true
+        answer: {type: integer, minimum: 0, maximum: 5}
+    TrueFalse:
+      type: object
+      additionalProperties: false
+      required: [topic_id, difficulty, stem, hint, explanation, citations, type, choices, answer]
+      properties:
+        topic_id: {$ref: '#/components/schemas/Uuid'}
+        difficulty:
+          type: string
+          enum: [easy, medium, hard]
+        stem: {type: string, minLength: 1, maxLength: 1000}
+        hint: {type: string, minLength: 1, maxLength: 300}
+        explanation: {type: string, minLength: 1, maxLength: 2000}
+        citations:
+          type: array
+          items: {$ref: '#/components/schemas/QuizCitation'}
+          minItems: 1
+          maxItems: 4
+          uniqueItems: true
+        type: {const: true_false}
+        choices: {type: 'null'}
+        answer: {type: boolean}
+    QuizResult:
+      type: object
+      additionalProperties: false
+      required: [protocol, request_id, course_id, scope, mock, grounded, model, questions]
+      properties:
+        protocol: {const: studygraph.quiz/1}
+        request_id: {$ref: '#/components/schemas/Uuid'}
+        course_id: {$ref: '#/components/schemas/Uuid'}
+        scope: {const: class_only}
+        mock:
+          type: boolean
+          description: 'Real provider: false. The shipped fixture service always returns true. CE refuses mock providers.'
+        grounded: {const: true}
+        model:
+          type: object
+          additionalProperties: false
+          required: [name, version]
+          properties:
+            name: {type: string, minLength: 1, maxLength: 100}
+            version: {type: string, minLength: 1, maxLength: 100}
+        questions:
+          type: array
+          items:
+            oneOf:
+            - {$ref: '#/components/schemas/Mcq'}
+            - {$ref: '#/components/schemas/TrueFalse'}
+          minItems: 1
+          maxItems: 10
+    MasteryEvent:
+      type: object
+      additionalProperties: false
+      required: [event_id, topic_id, topic_seq, qtype, difficulty, correct, hint_used, response_ms, telemetry_trusted, submitted_at]
+      properties:
+        event_id: {$ref: '#/components/schemas/Uuid'}
+        topic_id: {$ref: '#/components/schemas/Uuid'}
+        topic_seq: {type: integer, minimum: 1}
+        qtype:
+          type: string
+          enum: [mcq, true_false]
+        difficulty:
+          type: string
+          enum: [easy, medium, hard]
+        correct: {type: boolean}
+        hint_used:
+          type: integer
+          enum: [0, 1]
+        response_ms:
+          anyOf:
+          - {type: integer, minimum: 0, maximum: 3600000}
+          - {type: 'null'}
+        telemetry_trusted: {const: false}
+        submitted_at: {$ref: '#/components/schemas/Timestamp'}
+    MasteryRequest:
+      type: object
+      additionalProperties: false
+      required: [protocol, request_id, state_epoch, course_ref, learner_ref, pseudonym_namespace, events]
+      properties:
+        protocol: {const: studygraph.mastery/1}
+        request_id: {$ref: '#/components/schemas/Uuid'}
+        state_epoch: {$ref: '#/components/schemas/Uuid'}
+        course_ref: {$ref: '#/components/schemas/Sha256'}
+        learner_ref: {$ref: '#/components/schemas/Sha256'}
+        pseudonym_namespace: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{2,62}$'}
+        events:
+          type: array
+          items: {$ref: '#/components/schemas/MasteryEvent'}
+          minItems: 1
+          maxItems: 1000
+    TopicScore:
+      type: object
+      additionalProperties: false
+      required: [topic_id, mastery, attempts_seen, through_seq, next_review_at]
+      properties:
+        topic_id: {$ref: '#/components/schemas/Uuid'}
+        mastery: {type: number, minimum: 0, maximum: 1}
+        attempts_seen: {type: integer, minimum: 0}
+        through_seq: {type: integer, minimum: 1}
+        next_review_at:
+          anyOf:
+          - {$ref: '#/components/schemas/Timestamp'}
+          - {type: 'null'}
+    MasteryResult:
+      type: object
+      additionalProperties: false
+      required: [protocol, request_id, state_epoch, course_ref, learner_ref, mock, model, applied_event_ids, duplicate_event_ids,
+        scores]
+      properties:
+        protocol: {const: studygraph.mastery/1}
+        request_id: {$ref: '#/components/schemas/Uuid'}
+        state_epoch: {$ref: '#/components/schemas/Uuid'}
+        course_ref: {$ref: '#/components/schemas/Sha256'}
+        learner_ref: {$ref: '#/components/schemas/Sha256'}
+        mock:
+          type: boolean
+          description: 'Real provider: false. The shipped fixture service always returns true. CE refuses mock providers.'
+        model: {$ref: '#/components/schemas/MasteryModel'}
+        applied_event_ids:
+          type: array
+          items: {$ref: '#/components/schemas/Uuid'}
+          maxItems: 1000
+          uniqueItems: true
+        duplicate_event_ids:
+          type: array
+          items: {$ref: '#/components/schemas/Uuid'}
+          maxItems: 1000
+          uniqueItems: true
+        scores:
+          type: array
+          items: {$ref: '#/components/schemas/TopicScore'}
+          minItems: 1
+          maxItems: 1000
+  headers:
+    ContentLength:
+      description: Exact byte length of the UTF-8 response body. Exactly one numeric header.
+      required: true
+      schema: {type: string, pattern: '^[0-9]+$'}
+x-usage-profile:
+  status: PROPOSED
+  protocol: studygraph.usage/1
+  negotiationHeader: X-StudyGraph-Usage-Profile
+  required: false
+  specification: ../docs/ai-provider-handoff.md#proposed-usage-metadata

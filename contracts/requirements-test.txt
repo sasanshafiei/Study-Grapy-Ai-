@@ -1,0 +1,4 @@
+# Add to the core-api test environment for the independent consumer/provider checks.
+jsonschema[format-nongpl]==4.25.1
+openapi-spec-validator==0.7.2
+PyYAML==6.0.3
