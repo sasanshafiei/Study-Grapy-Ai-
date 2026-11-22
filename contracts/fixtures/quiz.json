@@ -1,0 +1,156 @@
+{
+  "capabilities": {
+    "protocol": "studygraph.quiz/1",
+    "service": "ai-service",
+    "mock": false,
+    "scopes": [
+      "class_only"
+    ],
+    "question_types": [
+      "mcq",
+      "true_false"
+    ],
+    "max_questions": 10,
+    "max_topics": 5
+  },
+  "request": {
+    "protocol": "studygraph.quiz/1",
+    "request_id": "00000000-0000-0000-0000-000000000005",
+    "course_id": "00000000-0000-0000-0000-000000000001",
+    "scope": "class_only",
+    "allowed_origins": [
+      "class"
+    ],
+    "topics": [
+      {
+        "topic_id": "00000000-0000-0000-0000-000000000004",
+        "name": "Catalysis"
+      }
+    ],
+    "count": 2,
+    "difficulty": "easy",
+    "question_types": [
+      "mcq",
+      "true_false"
+    ],
+    "limits": {
+      "max_stem_chars": 1000,
+      "max_hint_chars": 300,
+      "max_explanation_chars": 2000,
+      "min_choices": 2,
+      "max_choices": 6,
+      "max_choice_chars": 300,
+      "min_citations": 1,
+      "max_citations": 4,
+      "max_quote_chars": 500
+    }
+  },
+  "response": {
+    "protocol": "studygraph.quiz/1",
+    "request_id": "00000000-0000-0000-0000-000000000005",
+    "course_id": "00000000-0000-0000-0000-000000000001",
+    "scope": "class_only",
+    "mock": false,
+    "grounded": true,
+    "model": {
+      "name": "fixture-model",
+      "version": "1"
+    },
+    "questions": [
+      {
+        "topic_id": "00000000-0000-0000-0000-000000000004",
+        "difficulty": "easy",
+        "hint": "Think about the reaction pathway.",
+        "explanation": "A catalyst lowers the activation energy of a reaction.",
+        "citations": [
+          {
+            "chunk_id": "00000000-0000-0000-0000-000000000003",
+            "document_id": "00000000-0000-0000-0000-000000000002",
+            "origin": "class",
+            "quote": "A catalyst lowers the activation energy of a reaction.",
+            "locator": {
+              "page": 1
+            }
+          }
+        ],
+        "type": "mcq",
+        "stem": "Which barrier is reduced by a catalyst?",
+        "choices": [
+          "Activation energy",
+          "Equilibrium concentration"
+        ],
+        "answer": 0
+      },
+      {
+        "topic_id": "00000000-0000-0000-0000-000000000004",
+        "difficulty": "easy",
+        "hint": "Think about the reaction pathway.",
+        "explanation": "A catalyst lowers the activation energy of a reaction.",
+        "citations": [
+          {
+            "chunk_id": "00000000-0000-0000-0000-000000000003",
+            "document_id": "00000000-0000-0000-0000-000000000002",
+            "origin": "class",
+            "quote": "A catalyst lowers the activation energy of a reaction.",
+            "locator": {
+              "page": 1
+            }
+          }
+        ],
+        "type": "true_false",
+        "stem": "A catalyst increases the reaction energy barrier.",
+        "choices": null,
+        "answer": false
+      }
+    ]
+  },
+  "invalid_responses": [
+    {
+      "path": [
+        "questions",
+        0,
+        "citations",
+        0,
+        "locator"
+      ],
+      "value": {
+        "page": 0
+      },
+      "schema_valid": false
+    },
+    {
+      "path": [
+        "questions",
+        0,
+        "answer"
+      ],
+      "value": 4,
+      "schema_valid": true
+    },
+    {
+      "path": [
+        "questions",
+        1,
+        "answer"
+      ],
+      "value": 1,
+      "schema_valid": false
+    },
+    {
+      "path": [
+        "questions",
+        0,
+        "citations"
+      ],
+      "value": [],
+      "schema_valid": false
+    },
+    {
+      "path": [
+        "course_id"
+      ],
+      "value": "00000000-0000-0000-0000-000000000009",
+      "schema_valid": true
+    }
+  ]
+}

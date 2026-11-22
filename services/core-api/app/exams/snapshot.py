@@ -6,7 +6,7 @@ lock=True it takes the finalization locks in the M9 lock order: exam FOR UPDATE,
 and items FOR UPDATE (each in ascending id), questions FOR SHARE in ascending id.
 
 preview fingerprint (V3, H9; architecture §7.1): "pf1:" + SHA-256 of the canonical JSON of
-  {"v": 1, "exam": {id, version, status, title, instructions, duration_minutes}, "course": {id, code, name},
+  {"v": 2, "exam": {id, version, status, title, instructions, duration_minutes}, "course": {id, code, name},
    "items": [{id, position, points, blueprint_row_id, question_id, question_status, approved_revision_no,
               approved_content_sha256}] (by position),
    "blueprint": [{id, position, topic_id, qtype, difficulty, bloom_level, question_count, points_each}] (by position)}
@@ -63,8 +63,15 @@ class ItemState:
 
     @property
     def content(self):
-        """What this item shows and prints: the pinned revision when finalized, else the live working copy."""
+        """Editor detail shows the live working copy until the item is pinned."""
         return self.pinned if self.pinned is not None else self.question
+
+    @property
+    def print_content(self):
+        """Print the pinned revision, the revision ready to pin, or an unapproved working copy."""
+        if self.pinned is None and self.question.status == "approved":
+            return self.approved
+        return self.content
 
 
 @dataclass
@@ -112,7 +119,7 @@ def load_exam(session: Session, course_id: uuid.UUID, exam_id: uuid.UUID, course
     }
     wanted = {(q.id, q.approved_revision_no) for q in questions.values() if q.approved_revision_no is not None}
     wanted |= {(i.question_id, i.question_revision_no) for i in items if i.question_revision_no is not None}
-    revisions = _revisions(session, wanted)
+    revisions = load_revisions(session, wanted)
     rows_sorted = sorted(rows, key=lambda r: r.position)
     states = [
         ItemState(i, questions[i.question_id],
@@ -137,7 +144,7 @@ def load_exam(session: Session, course_id: uuid.UUID, exam_id: uuid.UUID, course
     return state
 
 
-def _revisions(session: Session, pairs: set) -> dict:
+def load_revisions(session: Session, pairs: set) -> dict:
     if not pairs:
         return {}
     ids, numbers = zip(*sorted(pairs))
@@ -157,7 +164,7 @@ def source_revisions(session: Session, source_exam_id: uuid.UUID) -> dict:
     ).all()
     if source is None or source.finalized_at is None:
         return {i.question_id: None for i in items}
-    revisions = _revisions(session, {(i.question_id, i.question_revision_no) for i in items})
+    revisions = load_revisions(session, {(i.question_id, i.question_revision_no) for i in items})
     return {i.question_id: revisions.get((i.question_id, i.question_revision_no)) for i in items}
 
 
@@ -233,11 +240,11 @@ def item_texts(state: ExamState, content) -> list[str]:
     return texts
 
 
-def content_chars(state: ExamState, contents: list | None = None) -> int:
+def content_chars(state: ExamState) -> int:
     header = header_values(state)
     total = sum(len(header[k] or "") for k in ("course_code", "course_name", "title", "instructions"))
-    for content in contents if contents is not None else [s.content for s in state.items]:
-        total += sum(len(t) for t in item_texts(state, content))
+    for item in state.items:
+        total += sum(len(t) for t in item_texts(state, item.print_content))
     return total
 
 
@@ -283,7 +290,7 @@ def fingerprint_object(exam, course, rows, items) -> dict:
         return None if value is None else str(value)
 
     return {
-        "v": 1,
+        "v": 2,  # Previews issued before approved source titles were frozen for printing require a fresh review.
         "exam": {"id": str(exam.id), "version": exam.version, "status": exam.status, "title": exam.title,
                  "instructions": exam.instructions, "duration_minutes": exam.duration_minutes},
         "course": {"id": str(course.id), "code": course.code, "name": course.name},
@@ -330,9 +337,9 @@ def _matches(row, content) -> bool:
                        bloom_level=content.bloom_level)  # fmt: skip
 
 
-def readiness(state: ExamState, settings, *, contents: list | None = None) -> dict:
-    """Blocking issues (finalization) and warnings, for the given item contents (default: what the items show)."""
-    contents = contents if contents is not None else [s.content for s in state.items]
+def readiness(state: ExamState, settings) -> dict:
+    """Blocking issues and warnings for the same content used by preview and finalization."""
+    contents = [s.print_content for s in state.items]
     issues, warnings = [], []
     if not state.items:
         issues.append({"code": "no_items", "overridable": False})
@@ -345,7 +352,7 @@ def readiness(state: ExamState, settings, *, contents: list | None = None) -> di
         elif s.question.status != "approved":
             issues.append({"code": "question_not_approved", "item_id": str(s.item.id),
                            "question_id": str(s.question.id), "overridable": False})  # fmt: skip
-    size = content_chars(state, contents)
+    size = content_chars(state)
     budget = settings.exam_export_max_content_chars
     if size > budget:
         issues.append({"code": "export_budget_exceeded", "content_chars": size, "export_budget": budget, "overridable": False})
@@ -441,19 +448,19 @@ def answer_entry(state: ExamState, number: int, points: int, content) -> dict:
             "model_answer": model_answer, "rubric": rubric, "explanation": content.explanation, "sources": sources}  # fmt: skip
 
 
-def answer_key_print_model(state: ExamState, contents: list | None = None) -> dict:
+def answer_key_print_model(state: ExamState) -> dict:
     """The superset print model whose canonical SHA-256 is exams.content_sha256 (renderer independent)."""
-    contents = contents if contents is not None else [s.content for s in state.items]
     header = header_values(state)
     questions, answers = [], []
-    for number, (s, content) in enumerate(zip(state.items, contents), start=1):
+    for number, s in enumerate(state.items, start=1):
+        content = s.print_content
         questions.append(student_question(number, s.item.points, content.qtype, stem_of(content), content.choices))
         answers.append(answer_entry(state, number, s.item.points, content))
     return {"v": PRINT_MODEL_VERSION, "header": header, "questions": questions, "answer_key": answers}
 
 
-def content_sha256(state: ExamState, contents: list | None = None) -> str:
-    return sha256_hex(answer_key_print_model(state, contents))
+def content_sha256(state: ExamState) -> str:
+    return sha256_hex(answer_key_print_model(state))
 
 
 def student_print_rows(session: Session, exam) -> list:
@@ -463,8 +470,15 @@ def student_print_rows(session: Session, exam) -> list:
                "ON r.question_id = i.question_id AND r.revision_no = i.question_revision_no WHERE i.exam_id = :e "
                "ORDER BY i.position")  # fmt: skip
     else:
-        sql = ("SELECT i.position, i.points, q.qtype, q.text AS stem, q.choices FROM exam_items i "
-               "JOIN questions q ON q.id = i.question_id WHERE i.exam_id = :e ORDER BY i.position")  # fmt: skip
+        sql = """
+            SELECT i.position, i.points,
+                   CASE WHEN q.status = 'approved' THEN r.qtype ELSE q.qtype END AS qtype,
+                   CASE WHEN q.status = 'approved' THEN r.stem ELSE q.text END AS stem,
+                   CASE WHEN q.status = 'approved' THEN r.choices ELSE q.choices END AS choices
+            FROM exam_items i JOIN questions q ON q.id = i.question_id
+            LEFT JOIN exam_question_revisions r ON r.question_id = q.id AND r.revision_no = q.approved_revision_no
+            WHERE i.exam_id = :e ORDER BY i.position
+        """
     return session.execute(text(sql), {"e": exam.id}).all()
 
 

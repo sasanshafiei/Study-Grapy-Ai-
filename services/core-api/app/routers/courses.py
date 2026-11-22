@@ -28,6 +28,7 @@ from ..errors import ApiError
 from ..json_body import read_json_object, require_keys
 from ..schemas.courses import CourseCreateBody, CourseItem, CourseJoinBody, TopicItem
 from ..schemas.documents import ErrorBody
+from ..schemas.openapi import BEARER, RETRY_AFTER, json_body
 from ..services import courses
 
 router = APIRouter(prefix="/api/v1", tags=["courses"])
@@ -40,13 +41,17 @@ JOIN_KEYS = frozenset({"join_code"})
 T = TypeVar("T")
 
 _ERRORS: dict[int | str, dict[str, Any]] = {
-    401: {"model": ErrorBody, "description": "Not signed in"},
+    500: {"model": ErrorBody},
+    401: {"model": ErrorBody, "description": "Not signed in", "headers": BEARER},
     403: {"model": ErrorBody, "description": "Account disabled, or the role may not do this"},
 }
 
 
+_BODY_ERRORS = {status: {"model": ErrorBody} for status in (400, 408, 413, 415, 422)}
+
+
 def _json_body(model) -> dict[str, Any]:
-    return {"requestBody": {"required": True, "content": {"application/json": {"schema": model.model_json_schema()}}}}
+    return json_body({**model.model_json_schema(), "additionalProperties": False})
 
 
 def in_transaction(factory, fn: Callable[..., T], *args) -> T:
@@ -82,7 +87,7 @@ def list_topics(
     "/courses",
     status_code=201,
     response_model=CourseItem,
-    responses={**_ERRORS, 413: {"model": ErrorBody}, 415: {"model": ErrorBody}, 422: {"model": ErrorBody}},
+    responses={**_ERRORS, **_BODY_ERRORS, 503: {"model": ErrorBody, "description": "join_code_unavailable"}},
     summary="Create a course (professors)",
     openapi_extra=_json_body(CourseCreateBody),
 )
@@ -100,11 +105,11 @@ async def create_course(request: Request, user: CurrentUser = Depends(get_curren
     "/courses/join",
     response_model=CourseItem,
     responses={
-        **_ERRORS,
+        **_ERRORS, **_BODY_ERRORS,
         201: {"model": CourseItem, "description": "Enrolled now"},
         404: {"model": ErrorBody, "description": "No joinable course has this code"},
-        409: {"model": ErrorBody, "description": "Already in the course with another role"},
-        429: {"model": ErrorBody, "description": "Too many join attempts"},
+        409: {"model": ErrorBody, "description": "Enrollment changed or the caller is already in the course with another role"},
+        429: {"model": ErrorBody, "description": "Too many join attempts", "headers": RETRY_AFTER},
     },
     summary="Join a course with its join code (students)",
     description="200 when the caller was already enrolled as a student, 201 when enrolled now.",

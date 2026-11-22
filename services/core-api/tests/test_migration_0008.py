@@ -554,10 +554,10 @@ def test_mig17_audit_events_are_append_only_and_idempotency_keys_unique(m9):
     _refused(e, lambda c: c.execute(text(insert_key), {"u": prof, "k": uuid.uuid4(), "op": "x", "c": course}), "shape_check")
 
 
-def test_mig18_workers_require_revision_0008():
+def test_mig18_workers_require_current_revision():
     from app.ingestion import runtime
 
-    assert runtime.REQUIRED_SCHEMA_REVISION == "0008"
+    assert runtime.REQUIRED_SCHEMA_REVISION == "0009"
 
 
 def test_mig19_true_false_rows_and_revisions_are_canonical(m9):

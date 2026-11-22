@@ -21,6 +21,7 @@ import json
 import logging
 import re
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -31,12 +32,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..errors import ApiError
 from ..json_body import invalid_body, read_json_object
-from ..quiz.diagnostics import describe, internal_error
+from ..quiz.diagnostics import describe, internal_error, sqlstate_of
 from ..quiz.protocol import canonical_uuid
 
 log = logging.getLogger("app.exams")
 
 NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+_BUSY_SQLSTATES = frozenset({"55P03", "57014", "40P01", "40001"})
 _IF_MATCH = re.compile(r'^"(0|[1-9][0-9]{0,8})"$')
 _CURSOR_CHARS = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
@@ -209,12 +211,26 @@ def etag(version: int) -> dict[str, str]:
     return {"ETag": f'"{version}"'}
 
 
+@contextmanager
+def mutation_response_read():
+    """The write phase has ended, including for a replay or a no-op. Only the response read can roll back here."""
+    try:
+        yield
+    except Exception as exc:
+        if sqlstate_of(exc) not in _BUSY_SQLSTATES:
+            raise
+        log.warning("exam_response_unavailable %s", describe(exc))
+        raise ApiError(503, "exam_response_unavailable",
+                       "The response could not be loaded. The change may already be saved. "
+                       "Reload the current state, or retry a create or duplicate with the same key and request.") from None
+
+
 async def guarded(call, endpoint: str):
     """Every error carries no-store; an unexpected exception is logged as class + SQLSTATE only.
 
     SQLAlchemy and Pydantic errors render statement parameters or input (stems, answer keys, explanations)
     in their message; nothing here logs a message, a traceback or a body (`from None` drops the chain).
-    A lock or statement timeout is 503 exam_busy: the transaction rolled back, nothing was written.
+    A busy mutation response read has its own error code so it can be reconciled safely.
     """
     try:
         return await call()
@@ -225,7 +241,7 @@ async def guarded(call, endpoint: str):
         raise
     except Exception as exc:
         state = describe(exc)
-        if any(code in state for code in ("sqlstate=55P03", "sqlstate=57014", "sqlstate=40P01", "sqlstate=40001")):
+        if sqlstate_of(exc) in _BUSY_SQLSTATES:
             log.warning("exam_endpoint_busy endpoint=%s %s", endpoint, state)
             raise ApiError(503, "exam_busy", "This exam is being changed right now. Try again in a moment.",
                            headers={**NO_STORE, "Retry-After": "2"}) from None  # fmt: skip

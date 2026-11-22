@@ -214,6 +214,30 @@ def test_e17_fill_from_blueprint_is_deterministic(ws):
     assert bad.status_code == 422 and bad.json()["reason"] == "unknown_row"
 
 
+@pytest.mark.parametrize("fits", [True, False])
+def test_f07_blueprint_fill_budgets_the_approved_citation(ws, make_api, fits):
+    world, course = ws["world"], ws["course"]
+    api = make_api(settings_overrides={**ex.ENABLED, "exam_export_max_content_chars": 1000}).as_user(ws["professor"])
+    x = ExamClient(api, course)
+    short_title, long_title = "a.pdf", "a" * 200 + ".pdf"
+    original, renamed = (short_title, long_title) if fits else (long_title, short_title)
+    doc = world.document(course, title=original, status="indexed", page_count=1)
+    ref = {"document_id": str(doc), "locator": {"page": 1}}
+    x.question(mcq_body(stem="s" * 850, explanation=None, source_refs=[ref]), approve=True)
+    world.execute("UPDATE documents SET title = :title WHERE id = :d", title=renamed, d=doc)
+    draft = x.blueprint(x.exam(), [row(1)])["exam"]
+    response = api.client.post(x.e_path(draft["id"], "/fill-from-blueprint"),
+                               json={"row_ids": None}, headers=match(draft["version"]))
+    assert response.status_code == 200, response.text
+    result = response.json()
+    outcome = result["filled"][0]
+    if fits:
+        assert (outcome["added"], outcome.get("stopped_by")) == (1, None)
+        assert x.finalized(result["exam"])["content_chars"] == result["exam"]["content_chars"]
+    else:
+        assert (outcome["added"], outcome.get("stopped_by")) == (0, "export_budget")
+
+
 def test_val08_export_budget_on_growth(ws, make_api):
     api = make_api(settings_overrides={**ex.ENABLED, "exam_export_max_content_chars": 1000}).as_user(ws["professor"])
     x, c = ExamClient(api, ws["course"]), api.client

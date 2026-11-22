@@ -1,11 +1,16 @@
 from fastapi import Request
-from sqlalchemy import MetaData, create_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy import Engine, MetaData, create_engine
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from .config import settings
+from .config import Settings, settings
 
-engine = create_engine(settings.database_url.get_secret_value(), pool_pre_ping=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+def create_engine_and_session_factory(settings: Settings) -> tuple[Engine, sessionmaker[Session]]:
+    engine = create_engine(settings.database_url.get_secret_value(), pool_pre_ping=True)
+    return engine, sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+engine, SessionLocal = create_engine_and_session_factory(settings)
 
 # Deterministic constraint and index names, so a migration can always refer to
 # an existing constraint by a name it can predict (needed to drop or alter it).

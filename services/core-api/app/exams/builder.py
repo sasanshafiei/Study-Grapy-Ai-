@@ -22,7 +22,7 @@ from . import audit, idempotency
 from . import snapshot as snap
 from .access import exam_item_not_found, exam_not_found, question_not_found, require_exam_owner
 from .bank import REPLAYED, Answer
-from .http import decode_cursor, encode_cursor, version_mismatch
+from .http import decode_cursor, encode_cursor, mutation_response_read, version_mismatch
 from .validation import BlueprintRowRequest, invalid_blueprint, matches_row
 from .views import exam_summary, exam_view, load_question
 
@@ -45,7 +45,7 @@ def bounded_ids(ids: list) -> dict:
     return {"ids": values[:MAX_AUDIT_IDS], "truncated": True, "count": len(values)}
 
 
-def deliver(factory, settings, user, course_id, exam_id) -> dict:
+def read_exam(factory, settings, user, course_id, exam_id) -> dict:
     """The current Exam, from one REPEATABLE READ READ ONLY snapshot that re-checks authorization first."""
     with short_tx(factory, read_only=True, snapshot=True) as session:
         course = require_exam_owner(session, user, course_id)
@@ -54,6 +54,11 @@ def deliver(factory, settings, user, course_id, exam_id) -> dict:
             raise exam_not_found()
         fingerprint = snap.digest(snap.fingerprint_input(session, state.exam, course)) if state.exam.status == "draft" else None
         return exam_view(state, settings, fingerprint)
+
+
+def deliver(factory, settings, user, course_id, exam_id) -> dict:
+    with mutation_response_read():
+        return read_exam(factory, settings, user, course_id, exam_id)
 
 
 def lock_exam(session: Session, course_id, exam_id, expected: int | None, *, draft: bool = True):
@@ -130,8 +135,7 @@ def list_exams(factory, user, course_id, status: str | None, limit: int, cursor:
     return {"items": [exam_summary(r) for r in page], "next_cursor": next_cursor}
 
 
-def _exam_limit(session: Session, settings, course_id) -> None:
-    session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": f"exam-limit:{course_id}"})
+def _check_exam_limit(session: Session, settings, course_id) -> None:
     count = session.execute(text("SELECT count(*) FROM exams WHERE course_id = :c"), {"c": course_id}).scalar_one()
     if count >= settings.exam_max_exams:
         raise ApiError(409, "exam_limit_reached", "This course has reached its exam limit.",
@@ -146,7 +150,8 @@ def create_exam(factory, settings, user, course_id, key: uuid.UUID, fields: dict
             require_exam_owner(session, user, course_id, lock=True)
             existing = idempotency.lookup(session, user.id, key, operation, print_)
             if existing is None:
-                _exam_limit(session, settings, course_id)
+                idempotency.lock_capacity_for_create(session, course_id, user.id, key, operation, print_)
+                _check_exam_limit(session, settings, course_id)
                 exam_id = session.execute(
                     text("INSERT INTO exams (course_id, created_by, title, instructions, duration_minutes, status, version) "
                          "VALUES (:c, :u, :t, :i, :d, 'draft', 1) RETURNING id"),  # fmt: skip
@@ -163,10 +168,6 @@ def create_exam(factory, settings, user, course_id, key: uuid.UUID, fields: dict
             require_exam_owner(session, user, course_id)
             existing = idempotency.lookup(session, user.id, key, operation, print_)
     return Answer(200, deliver(factory, settings, user, course_id, existing), REPLAYED)
-
-
-def read_exam(factory, settings, user, course_id, exam_id) -> dict:
-    return deliver(factory, settings, user, course_id, exam_id)
 
 
 def update_exam(factory, settings, user, course_id, exam_id, expected: int, fields: dict) -> dict:
@@ -437,32 +438,34 @@ def fill_from_blueprint(factory, settings, user, course_id, exam_id, expected: i
             needed = max(0, row.question_count - assigned)
             added = 0
             if needed and not stopped:
-                candidates = session.execute(
-                    text(f"SELECT {snap.QUESTION_COLUMNS} FROM questions WHERE course_id = :c AND version IS NOT NULL "
+                candidate_ids = session.execute(
+                    text("SELECT id FROM questions WHERE course_id = :c AND version IS NOT NULL "
                          "AND purpose = 'exam' AND status = 'approved' AND (CAST(:t AS uuid) IS NULL OR topic_id = :t) "
                          "AND (CAST(:q AS text) IS NULL OR qtype = :q) AND (CAST(:d AS text) IS NULL OR difficulty = :d) "
                          "AND (CAST(:b AS text) IS NULL OR bloom_level = :b) AND id <> ALL(CAST(:taken AS uuid[])) "
                          "ORDER BY created_at ASC, id ASC LIMIT :n"),  # fmt: skip
                     {"c": course_id, "t": row.topic_id, "q": row.qtype, "d": row.difficulty, "b": row.bloom_level,
                      "taken": sorted(in_exam), "n": needed},  # fmt: skip
+                ).scalars().all()
+                approved_pairs = session.execute(
+                    text("SELECT id, approved_revision_no FROM questions WHERE id = ANY(CAST(:ids AS uuid[])) "
+                         "AND status = 'approved' ORDER BY id FOR SHARE"),
+                    {"ids": candidate_ids},
                 ).all()
-                locked = {r.id: r for r in session.execute(
-                    text(f"SELECT {snap.QUESTION_COLUMNS} FROM questions WHERE id = ANY(CAST(:ids AS uuid[])) ORDER BY id FOR SHARE"),
-                    {"ids": sorted(c.id for c in candidates)},
-                ).all()}  # fmt: skip
-                refs = {uuid.UUID(r["document_id"]) for c in locked.values() for r in (c.citations or [])}
-                state.documents.update({d.id: d for d in session.execute(
-                    text("SELECT id, title, page_count FROM documents WHERE course_id = :c AND origin = 'class' AND id = ANY(CAST(:ids AS uuid[]))"),
-                    {"c": course_id, "ids": sorted(refs)},
-                ).all()})  # fmt: skip
-                for candidate in candidates:
-                    q = locked.get(candidate.id)
-                    if q is None or q.status != "approved":
+                revisions = snap.load_revisions(session, set(approved_pairs))
+                by_question = {r.question_id: r for r in revisions.values()}
+                for question_id in candidate_ids:
+                    revision = by_question.get(question_id)
+                    # A candidate may have been edited and reapproved before the FOR SHARE lock.
+                    if revision is None or not matches_row(
+                        row, topic_id=revision.topic_id, qtype=revision.qtype,
+                        difficulty=revision.difficulty, bloom_level=revision.bloom_level,
+                    ):
                         continue
                     if position >= settings.exam_max_items:
                         stopped = "item_limit"
                         break
-                    grow = sum(len(t) for t in snap.item_texts(state, q))
+                    grow = sum(len(t) for t in snap.item_texts(state, revision))
                     if size + grow > budget:
                         stopped = "export_budget"
                         break
@@ -471,9 +474,9 @@ def fill_from_blueprint(factory, settings, user, course_id, exam_id, expected: i
                     session.execute(
                         text("INSERT INTO exam_items (exam_id, course_id, question_id, position, points, blueprint_row_id) "
                              "VALUES (:e, :c, :q, :p, :pts, :r)"),  # fmt: skip
-                        {"e": exam_id, "c": course_id, "q": q.id, "p": position, "pts": row.points_each, "r": row.id},
+                        {"e": exam_id, "c": course_id, "q": question_id, "p": position, "pts": row.points_each, "r": row.id},
                     )
-                    in_exam.add(q.id)
+                    in_exam.add(question_id)
                     added += 1
             missing = needed - added
             entry = {"blueprint_row_id": str(row.id), "added": added, "missing": missing,

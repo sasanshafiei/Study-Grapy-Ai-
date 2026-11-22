@@ -129,7 +129,7 @@ bloom_level, topic, stem_preview (first 200 code points), approved_revision, upd
 | E2 | `POST /exam-questions` | Idempotency-Key. Body exactly `type, difficulty, bloom_level, topic_id, stem, choices, answer_key, explanation, source_refs`. 201 ExamQuestion (draft, version 1) |
 | E3 | `GET /exam-questions/{id}` | 200 ExamQuestion + ETag |
 | E4 | `PUT /exam-questions/{id}` | If-Match. Same body as E2, full replacement. 200 `{"question", "approval_revoked"}`; identical content → no change; retired → 409 `question_retired` |
-| E5 | `POST /exam-questions/{id}/approve` | If-Match, no body (or `{}`). Inserts revision n+1 with the exact current content, hash and frozen source titles; 422 `invalid_question` (`source_refs`, `source_ref_unavailable`) when a referenced document is gone |
+| E5 | `POST /exam-questions/{id}/approve` | If-Match, no body (or `{}`). Rechecks source pages and freezes the current question and source titles in revision n+1. See approval rules below. |
 | E6 | `POST /exam-questions/{id}/retire` | If-Match, no body |
 | E7 | `GET /exam-questions/{id}/revisions` | `{"items": [QuestionRevision], "next_cursor"}`, newest first |
 | — | `GET /exam-questions/{id}/history` | audit events of the question |
@@ -142,6 +142,18 @@ bloom_level, topic, stem_preview (first 200 code points), approved_revision, upd
 `invalid_question` carries `field` and `reason` ∈ `length, control_characters, choice_count,
 choice_ids, duplicate_choice, answer_key, type_shape, true_false_choices, topic, source_ref, locator,
 source_ref_unavailable`.
+
+**Source pages at approval.** A draft may cite a PDF before parsing finishes. Approval rechecks each
+referenced class document in the same course under a row lock. A page above its known count returns
+422 `invalid_question`, field `source_refs`, reason `locator`. Page numbers start at 1 and the last
+physical page is valid, including a blank page. A missing document or a PDF without a page count returns
+the same 422 with reason `source_ref_unavailable`. Once parsing records the count, the professor can
+retry with the same question version if the draft has not changed. Indexing is independent of approval.
+
+The upload service records PDFs as `application/pdf`. Other class sources and legacy rows without a
+recorded MIME type enforce the upper bound when a count exists.
+Exam source references accept only page locators. These checks apply when creating a new approved
+revision. Previously approved revisions and finalized exams retain their frozen citations.
 
 **QuestionRevision:** `revision, approved_at, approved_by_name, content_sha256, type, difficulty,
 bloom_level, topic, stem, choices, answer_key, explanation, source_refs [{document_id, title,
@@ -233,13 +245,16 @@ first, so concurrent changes are serialized and the loser gets 412.
 `variant=answer_key` adds `answer_key: [{number, points, answer, answer_text, model_answer, rubric,
 explanation, sources ["<frozen title>, p. 6"]}]` (MCQ: `answer` = label, `answer_text` = choice text;
 true/false: `answer` = "True"/"False"; short: `model_answer`, `rubric`). Drafts use the live course header;
-finalized exams the frozen one. Works with `EXAM_EXPORT_ENABLED=false`.
+finalized exams the frozen one. Draft previews (E18 and E23) print approved questions from their current
+approved revisions, including the titles recorded at approval. The draft editor still reports the current
+title and availability when a source is renamed or removed. Unapproved questions preview their working copies
+and block finalization. The JSON preview works with `EXAM_EXPORT_ENABLED=false`.
 
 **`preview_fingerprint`** = `"pf1:"` + lower-case SHA-256 of the canonical JSON (UTF-8, sorted keys, no
 insignificant whitespace) of
 
 ```
-{"v": 1,
+{"v": 2,
  "exam": {"id", "version", "status", "title", "instructions", "duration_minutes"},
  "course": {"id", "code", "name"},                       (live values that finalization freezes)
  "items": [{"id", "position", "points", "blueprint_row_id", "question_id", "question_status",
@@ -253,7 +268,10 @@ the same for both variants, always 68 characters, `null` for finalized exams, an
 `readiness` and the `X-Exam-Preview-Fingerprint` header of E23. It changes when anything finalization
 would freeze or decide on changes (exam metadata, course code/name, items, points, order, assignments,
 blueprint rows, a linked question's status or approved revision) and not for edits of questions outside
-the exam.
+the exam. Input version 2 binds the review to the approved-revision printing rule. An outstanding draft
+fingerprint issued under version 1 returns `412 exam_preview_stale` at finalization and needs a fresh
+preview. The wire format stays `pf1:<64 hex>`. An identical retry of a previously committed finalization
+still uses its stored fingerprint.
 
 ### Finalize (E19)
 
@@ -315,7 +333,7 @@ id lists are truncated with a count), never stems, answers or explanations. Even
 
 `content_chars` counts every text the answer-key variant prints: exam title, instructions, course code and
 name, and per item stem, choice texts (true/false: "True" and "False"), model answer, rubric, explanation,
-source titles and locator labels (drafts: live titles; finalization: the frozen ones). It must stay ≤
+source titles and locator labels. Approved items count their frozen titles even in drafts. It must stay ≤
 `EXAM_EXPORT_MAX_CONTENT_CHARS` (300,000): adding items, filling and duplicating refuse growth beyond it
 (409 `export_budget_exceeded`); bank edits are not blocked, readiness then shows the blocking issue and
 finalization refuses. The finalized value is stored (CHECK 1–300,000). Calibration: [exam-export.md](exam-export.md).
@@ -335,10 +353,37 @@ finalization refuses. The finalized value is stored (CHECK 1–300,000). Calibra
 | 428 | `precondition_required`, `preview_fingerprint_required` |
 | 429 | `export_busy`, `too_many_exports` (+ `Retry-After`) |
 | 500 | `server_error`, `export_failed` |
-| 503 | `exams_unavailable`, `exam_export_unavailable`, `exam_busy` (+ `Retry-After: 2`; lock or statement timeout, deadlock or serialization failure: nothing was written) |
+| 503 | `exams_unavailable`, `exam_export_unavailable`, `exam_busy` (with `Retry-After: 2`), `exam_response_unavailable` |
 | 504 | `export_timeout` |
 
 Unexpected errors are logged as exception class + SQLSTATE only, never with statement parameters.
+
+### Recovering from an unavailable response
+
+Lock and statement timeouts, deadlocks and serialization failures have two different recovery paths.
+`exam_busy` on an ordinary read or before a write commits means this attempt made no new change.
+Wait for `Retry-After` and retain the original request preconditions. An earlier attempt with the same
+key or intent may already have succeeded.
+
+For bank mutations (E2, E4–E6), exam creation and editing (E9, E11–E17), and finalization, archive
+and duplication (E19–E21), the API reads the response in a fresh, authorized transaction. A busy error
+during that read returns `503 exam_response_unavailable`. A change may already be committed. Replays
+and no-ops can also receive this code. The response contains only `code` and generic `detail`,
+with no resource identifiers or `Retry-After` header. Failed authorization still returns the usual
+401, 403 or 404.
+
+These recovery steps also apply to a generic server error or a lost connection when the outcome is unknown.
+
+- **Create or duplicate.** Repeat the same operation in the same course, as the same user, with the
+  original `Idempotency-Key` and equivalent body. A committed creation replays its current representation.
+- **Approve, retire, finalize or archive.** Refetch the resource or replay the original transition with
+  its original `If-Match`. Finalization also requires the exact reviewed fingerprint and deviation reason.
+- **Other edits, including item and blueprint changes.** Fetch the question or exam and compare its
+  version and content. Consult its history if later edits have intervened. A retry using a consumed
+  version returns 412. Use a newer version only for a newly reviewed edit.
+
+File endpoints (E22–E23) authorize before rendering, then recheck access and commit the download audit
+event before sending bytes. A lost download response can leave an audit event even if the client received no file.
 
 ## 6. Leakage isolation
 
@@ -357,8 +402,9 @@ the upload directory and the logs.
 4. Advisors confirm that a *finalized* exam is the capstone's "approved exam" and the export layout.
 5. `EXAMS_ENABLED=true`, then `EXAM_EXPORT_ENABLED=true` after a manual review of real exports.
 6. Export limits are per API process; a shared (Redis) limiter is needed before several processes run.
-7. CORS `expose_headers` for `Content-Disposition`, `Location`, `Retry-After`, `Idempotent-Replayed`,
-   `ETag`, `X-Exam-*` (decision D-25, CE-3); until then clients use `version` from the JSON body.
+7. CE-2 and CE-3 agree on the exact web origins for each deployment. Set `CORS_ALLOWED_ORIGINS`
+   on core-api and verify cross-origin downloads through the deployed proxy (D-25).
+   [Browser origins and readable headers](frontend-exam-adaptation.md#browser-origins-and-readable-headers)
 8. M9-A2 (AI candidates) only after AI-1 approves `studygraph.exam/1`, the OpenAPI change is signed by one
    CE and one AI member, migration 0009 is reviewed, and its own test cycle passes.
 
@@ -377,5 +423,5 @@ Decisions the implementation had to make where the contract was silent; none wea
 | No-op mutations | identical E4, E11, E12, E14, E16 bodies answer 200 without a version bump |
 | Metadata edits | E11 does not check the export budget (like bank edits; finalization is authoritative) |
 | Archived draft | E23 is 409 `exam_not_finalized` (only drafts and finalized exams have files) |
-| Busy | deadlocks and serialization failures are also answered 503 `exam_busy` |
+| Busy | A lock or statement timeout, deadlock or serialization failure returns the phase-specific 503 described in §5 |
 | Audit timestamps | `clock_timestamp()`, so several events of one transaction keep their order |

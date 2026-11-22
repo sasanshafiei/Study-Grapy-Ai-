@@ -190,6 +190,7 @@ def test_no_endpoint_exposes_parsed_content():
         "/api/v1/courses/{course_id}/exams/{exam_id}/preview-file": ["get"],
         "/health": ["get"],
         "/health/db": ["get"],
+        "/health/ready": ["get"],
     }
 
 

@@ -19,9 +19,10 @@ from sqlalchemy.orm import Session
 from ..chat.verify import VerificationFailed, public_title
 from ..errors import ApiError
 from ..quiz.access import short_tx
+from ..uploads import PDF_MEDIA_TYPE
 from . import audit, idempotency
 from .access import question_not_found, require_exam_owner
-from .http import decode_cursor, encode_cursor, version_mismatch
+from .http import decode_cursor, encode_cursor, mutation_response_read, version_mismatch
 from .validation import QuestionContent, content_from_row, invalid_question, locator_label
 from .views import load_question, question_summary, question_view, revision_view
 
@@ -39,7 +40,7 @@ def question_retired() -> ApiError:
     return ApiError(409, "question_retired", "This question is retired and can no longer be changed or used.")
 
 
-def deliver(factory, user, course_id, question_id) -> dict:
+def read_question(factory, user, course_id, question_id) -> dict:
     """The current representation, in a fresh read-only snapshot that re-checks authorization."""
     with short_tx(factory, read_only=True, snapshot=True) as session:
         require_exam_owner(session, user, course_id)
@@ -47,6 +48,16 @@ def deliver(factory, user, course_id, question_id) -> dict:
     if view is None:
         raise question_not_found()
     return view
+
+
+def deliver(factory, user, course_id, question_id) -> dict:
+    with mutation_response_read():
+        return read_question(factory, user, course_id, question_id)
+
+
+def _check_page_bound(page: int, page_count: int | None) -> None:
+    if page_count is not None and page > page_count:
+        raise invalid_question("source_refs", "locator", "A source reference points past the document's last page.")
 
 
 def check_references(session: Session, course_id, content: QuestionContent) -> None:
@@ -66,8 +77,7 @@ def check_references(session: Session, course_id, content: QuestionContent) -> N
         document = documents.get(document_id)
         if document is None:
             raise invalid_question("source_refs", "source_ref", "A source reference names no class document of this course.")
-        if document.page_count is not None and page > document.page_count:
-            raise invalid_question("source_refs", "locator", "A source reference points past the document's last page.")
+        _check_page_bound(page, document.page_count)
 
 
 def _content_params(content: QuestionContent) -> dict:
@@ -89,8 +99,7 @@ def create_question(factory, settings, user, course_id, key: uuid.UUID, content:
             require_exam_owner(session, user, course_id, lock=True)
             existing = idempotency.lookup(session, user.id, key, operation, print_)
             if existing is None:
-                session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
-                                {"k": f"exam-bank-limit:{course_id}"})  # fmt: skip
+                idempotency.lock_capacity_for_create(session, course_id, user.id, key, operation, print_)
                 count = session.execute(text("SELECT count(*) FROM questions WHERE course_id = :c AND version IS NOT NULL"),
                                         {"c": course_id}).scalar_one()  # fmt: skip
                 if count >= settings.exam_max_bank_questions:
@@ -117,11 +126,7 @@ def create_question(factory, settings, user, course_id, key: uuid.UUID, content:
     return Answer(200, deliver(factory, user, course_id, existing), REPLAYED)
 
 
-# --- E3 read, E1 list -----------------------------------------------------------------------------------------
-
-
-def read_question(factory, user, course_id, question_id) -> dict:
-    return deliver(factory, user, course_id, question_id)
+# --- E1 list --------------------------------------------------------------------------------------------------
 
 
 def list_questions(factory, user, course_id, filters: dict, limit: int, cursor: str | None) -> dict:
@@ -197,12 +202,13 @@ def replace_question(factory, user, course_id, question_id, expected: int, conte
 
 
 def _frozen_refs(session: Session, course_id, q) -> list[dict]:
-    """Every referenced document re-read FOR SHARE: still a class document of this course; titles frozen now."""
+    """Validate page references and freeze titles while holding the document locks through approval."""
     refs = list(q.citations or [])
     if not refs:
         return []
     documents = {d.id: d for d in session.execute(
-        text("SELECT id, title FROM documents WHERE course_id = :c AND origin = 'class' AND id = ANY(CAST(:ids AS uuid[])) "
+        text("SELECT id, title, mime_type, page_count FROM documents "
+             "WHERE course_id = :c AND origin = 'class' AND id = ANY(CAST(:ids AS uuid[])) "
              "ORDER BY id FOR SHARE"),
         {"c": course_id, "ids": sorted({uuid.UUID(r["document_id"]) for r in refs})},
     ).all()}  # fmt: skip
@@ -216,8 +222,15 @@ def _frozen_refs(session: Session, course_id, q) -> list[dict]:
         if title is None:
             raise invalid_question("source_refs", "source_ref_unavailable",
                                    "A referenced document is no longer available in this course; edit the source references first.")  # fmt: skip
+        if document.mime_type == PDF_MEDIA_TYPE and document.page_count is None:
+            raise invalid_question(
+                "source_refs", "source_ref_unavailable",
+                "The PDF's page count is unavailable. Wait for parsing or edit the reference before approval.",
+            )
+        page = ref["locator"]["page"]
+        _check_page_bound(page, document.page_count)
         frozen.append({"document_id": ref["document_id"], "locator": ref["locator"], "title": title,
-                       "locator_label": locator_label(ref["locator"]["page"])})  # fmt: skip
+                       "locator_label": locator_label(page)})  # fmt: skip
     return frozen
 
 

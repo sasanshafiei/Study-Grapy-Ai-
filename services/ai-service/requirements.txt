@@ -1,2 +1,4 @@
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
+jsonschema[format-nongpl]==4.25.1
+PyYAML==6.0.3

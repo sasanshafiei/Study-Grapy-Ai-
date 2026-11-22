@@ -27,8 +27,8 @@ from . import audit, idempotency
 from . import snapshot as snap
 from .access import exam_not_found, require_exam_owner
 from .bank import REPLAYED, Answer
-from .builder import _exam_limit, _record, budget_exceeded, deliver, lock_exam
-from .http import version_mismatch
+from .builder import _check_exam_limit, _record, budget_exceeded, deliver, lock_exam
+from .http import mutation_response_read, version_mismatch
 from .validation import copy_title
 from .views import exam_view
 
@@ -93,9 +93,7 @@ def _finalize_locked(session, settings, user, course_id, state, course, expected
         raise ApiError(412, "exam_preview_stale",
                        "The exam or its questions changed after this preview. Preview it again and review it before finalizing.",
                        extra={"current_version": state.exam.version})  # fmt: skip
-    # The content being pinned: each approved question's current approved revision (named by the digest).
-    contents = [s.approved if s.question.status == "approved" and s.approved is not None else s.question for s in state.items]
-    result = snap.readiness(state, settings, contents=contents)
+    result = snap.readiness(state, settings)
     blocking = [i for i in result["issues"] if not i["overridable"]]
     deviations = [i for i in result["issues"] if i["overridable"]]
     if blocking or (deviations and reason is None):
@@ -108,10 +106,10 @@ def _finalize_locked(session, settings, user, course_id, state, course, expected
              "WHERE q.id = i.question_id AND i.exam_id = :e"),  # fmt: skip
         {"e": state.exam.id},
     )
-    size = snap.content_chars(state, contents)
+    size = snap.content_chars(state)
     if size > settings.exam_export_max_content_chars:  # already a blocking issue; kept as a direct guard
         raise budget_exceeded(size, settings.exam_export_max_content_chars)
-    content_sha = snap.content_sha256(state, contents)
+    content_sha = snap.content_sha256(state)
     total = sum(s.item.points for s in state.items)
     session.execute(
         text("UPDATE exams SET status = 'finalized', version = version + 1, finalized_version = version + 1, "
@@ -175,7 +173,7 @@ def duplicate_report(session, new_exam_id, source_exam_id) -> list[dict]:
 
 
 def _deliver_duplicate(factory, settings, user, course_id, exam_id) -> dict:
-    with short_tx(factory, read_only=True, snapshot=True) as session:
+    with mutation_response_read(), short_tx(factory, read_only=True, snapshot=True) as session:
         course = require_exam_owner(session, user, course_id)
         state = snap.load_exam(session, course_id, exam_id, course)
         if state is None:
@@ -200,7 +198,8 @@ def duplicate(factory, settings, user, course_id, source_id, key: uuid.UUID, tit
                 ).first()
                 if source is None:
                     raise exam_not_found()
-                _exam_limit(session, settings, course_id)
+                idempotency.lock_capacity_for_create(session, course_id, user.id, key, operation, print_)
+                _check_exam_limit(session, settings, course_id)
                 new_id = session.execute(
                     text("INSERT INTO exams (course_id, created_by, title, instructions, duration_minutes, status, version, "
                          "derived_from_exam_id) VALUES (:c, :u, :t, :i, :d, 'draft', 1, :src) RETURNING id"),  # fmt: skip

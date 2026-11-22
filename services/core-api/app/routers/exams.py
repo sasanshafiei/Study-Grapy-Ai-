@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from ..auth import CurrentUser, get_current_user
 from ..errors import ApiError
 from ..exams import bank, builder, finalize
+from ..exams import openapi as wire
 from ..exams.access import exam_item_not_found, exam_not_found
 from ..exams.http import (
     NoStoreRoute,
@@ -39,7 +40,7 @@ from ..exams.validation import (
     require_exact_keys,
 )
 from ..quiz.protocol import canonical_uuid
-from ..schemas.documents import ErrorBody
+from ..schemas.openapi import ResourceId
 from ..schemas.exams import (
     AuditList,
     BlueprintResponse,
@@ -52,7 +53,6 @@ from ..schemas.exams import (
 from .exam_questions import authorize
 
 router = APIRouter(prefix="/api/v1", tags=["exams"], route_class=NoStoreRoute)
-_ERRORS = {s: {"model": ErrorBody} for s in (400, 401, 403, 404, 408, 409, 412, 413, 415, 422, 428, 429, 500, 503, 504)}
 _FINGERPRINT_CHARS = frozenset("0123456789abcdef")
 
 
@@ -67,9 +67,12 @@ def _exam_response(status: int, body: dict, headers: dict | None = None):
     return respond(status, body, Exam, {**(headers or {}), **etag(body["version"])})
 
 
-@router.get("/courses/{course_id}/exams", response_model=None, responses={**_ERRORS, 200: {"model": ExamList}},
-            summary="List the course's exams")  # fmt: skip
-async def list_exams(course_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.get(
+    "/courses/{course_id}/exams", response_model=None,
+    summary="List the course's exams",
+    **wire.read(ExamList, wire.EXAMS),
+)
+async def list_exams(course_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         params = query_params(request, frozenset({"status", "limit", "cursor"}))
@@ -81,10 +84,13 @@ async def list_exams(course_id: str, request: Request, user: CurrentUser = Depen
     return await guarded(run, "exams.list")
 
 
-@router.post("/courses/{course_id}/exams", status_code=201, response_model=None,
-             responses={**_ERRORS, 201: {"model": Exam}, 200: {"model": Exam, "description": "Replay"}},
-             summary="Create a draft exam (Idempotency-Key)")  # fmt: skip
-async def create_exam(course_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.post(
+    "/courses/{course_id}/exams", response_model=None, status_code=201,
+    summary="Create a draft exam (Idempotency-Key)",
+    **wire.mutation(Exam, wire.EXAM, keyed=True, invalid="invalid_exam",
+                    conflicts="idempotency_key_reused exam_limit_reached"),
+)
+async def create_exam(course_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         state = request.app.state
@@ -96,9 +102,12 @@ async def create_exam(course_id: str, request: Request, user: CurrentUser = Depe
     return await guarded(run, "exams.create")
 
 
-@router.get("/courses/{course_id}/exams/{exam_id}", response_model=None, responses={**_ERRORS, 200: {"model": Exam}},
-            summary="One exam with blueprint, items, readiness and preview fingerprint")  # fmt: skip
-async def read_exam(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.get(
+    "/courses/{course_id}/exams/{exam_id}", response_model=None,
+    summary="One exam with blueprint, items, readiness and preview fingerprint",
+    **wire.read(Exam, etag=True),
+)
+async def read_exam(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         query_params(request, frozenset())
@@ -109,9 +118,12 @@ async def read_exam(course_id: str, exam_id: str, request: Request, user: Curren
     return await guarded(run, "exams.read")
 
 
-@router.patch("/courses/{course_id}/exams/{exam_id}", response_model=None, responses={**_ERRORS, 200: {"model": Exam}},
-              summary="Change title, instructions or duration (If-Match)")  # fmt: skip
-async def update_exam(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.patch(
+    "/courses/{course_id}/exams/{exam_id}", response_model=None,
+    summary="Change title, instructions or duration (If-Match)",
+    **wire.mutation(Exam, wire.patch(wire.EXAM), invalid="invalid_exam", conflicts="exam_not_draft"),
+)
+async def update_exam(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         state = request.app.state
@@ -124,9 +136,12 @@ async def update_exam(course_id: str, exam_id: str, request: Request, user: Curr
     return await guarded(run, "exams.update")
 
 
-@router.put("/courses/{course_id}/exams/{exam_id}/blueprint", response_model=None,
-            responses={**_ERRORS, 200: {"model": BlueprintResponse}}, summary="Replace the blueprint (If-Match)")  # fmt: skip
-async def replace_blueprint(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.put(
+    "/courses/{course_id}/exams/{exam_id}/blueprint", response_model=None,
+    summary="Replace the blueprint (If-Match)",
+    **wire.mutation(BlueprintResponse, wire.BLUEPRINT, invalid="invalid_blueprint", conflicts="exam_not_draft"),
+)
+async def replace_blueprint(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         state = request.app.state
@@ -148,9 +163,13 @@ def _optional_uuid(value, error: ApiError):
     return parsed
 
 
-@router.post("/courses/{course_id}/exams/{exam_id}/items", status_code=201, response_model=None,
-             responses={**_ERRORS, 201: {"model": Exam}}, summary="Add a bank question to the exam (If-Match)")  # fmt: skip
-async def add_item(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.post(
+    "/courses/{course_id}/exams/{exam_id}/items", response_model=None, status_code=201,
+    summary="Add a bank question to the exam (If-Match)",
+    **wire.mutation(Exam, wire.ITEM, item=True, invalid="invalid_position invalid_blueprint_row invalid_points",
+                    conflicts="exam_not_draft exam_item_limit question_retired question_already_in_exam export_budget_exceeded"),
+)
+async def add_item(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         state = request.app.state
@@ -178,9 +197,12 @@ def item_id_of(raw: str) -> uuid.UUID:
     return parsed
 
 
-@router.put("/courses/{course_id}/exams/{exam_id}/items/order", response_model=None,
-            responses={**_ERRORS, 200: {"model": Exam}}, summary="Reorder all items (If-Match)")  # fmt: skip
-async def reorder_items(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.put(
+    "/courses/{course_id}/exams/{exam_id}/items/order", response_model=None,
+    summary="Reorder all items (If-Match)",
+    **wire.mutation(Exam, wire.ORDER, invalid="invalid_order", conflicts="exam_not_draft"),
+)
+async def reorder_items(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         state = request.app.state
@@ -197,9 +219,12 @@ async def reorder_items(course_id: str, exam_id: str, request: Request, user: Cu
     return await guarded(run, "exams.reorder")
 
 
-@router.patch("/courses/{course_id}/exams/{exam_id}/items/{item_id}", response_model=None,
-              responses={**_ERRORS, 200: {"model": Exam}}, summary="Change an item's points or blueprint row (If-Match)")  # fmt: skip
-async def update_item(course_id: str, exam_id: str, item_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.patch(
+    "/courses/{course_id}/exams/{exam_id}/items/{item_id}", response_model=None,
+    summary="Change an item's points or blueprint row (If-Match)",
+    **wire.mutation(Exam, wire.ITEM_PATCH, invalid="invalid_points invalid_blueprint_row", conflicts="exam_not_draft"),
+)
+async def update_item(course_id: ResourceId, exam_id: ResourceId, item_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         state = request.app.state
@@ -220,9 +245,12 @@ async def update_item(course_id: str, exam_id: str, item_id: str, request: Reque
     return await guarded(run, "exams.update_item")
 
 
-@router.delete("/courses/{course_id}/exams/{exam_id}/items/{item_id}", response_model=None,
-               responses={**_ERRORS, 200: {"model": Exam}}, summary="Remove an item (If-Match)")  # fmt: skip
-async def remove_item(course_id: str, exam_id: str, item_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.delete(
+    "/courses/{course_id}/exams/{exam_id}/items/{item_id}", response_model=None,
+    summary="Remove an item (If-Match)",
+    **wire.mutation(Exam, wire.EMPTY, conflicts="exam_not_draft"),
+)
+async def remove_item(course_id: ResourceId, exam_id: ResourceId, item_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         state = request.app.state
@@ -235,9 +263,12 @@ async def remove_item(course_id: str, exam_id: str, item_id: str, request: Reque
     return await guarded(run, "exams.remove_item")
 
 
-@router.post("/courses/{course_id}/exams/{exam_id}/fill-from-blueprint", response_model=None,
-             responses={**_ERRORS, 200: {"model": FillResponse}}, summary="Add matching approved questions (If-Match)")  # fmt: skip
-async def fill(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.post(
+    "/courses/{course_id}/exams/{exam_id}/fill-from-blueprint", response_model=None,
+    summary="Add matching approved questions (If-Match)",
+    **wire.mutation(FillResponse, wire.FILL, invalid="invalid_blueprint", conflicts="exam_not_draft export_budget_exceeded"),
+)
+async def fill(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         state = request.app.state
@@ -256,9 +287,12 @@ async def fill(course_id: str, exam_id: str, request: Request, user: CurrentUser
     return await guarded(run, "exams.fill")
 
 
-@router.get("/courses/{course_id}/exams/{exam_id}/preview", response_model=None, responses={**_ERRORS, 200: {"model": Preview}},
-            summary="The print model the renderer would use, with readiness and preview fingerprint")  # fmt: skip
-async def preview(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.get(
+    "/courses/{course_id}/exams/{exam_id}/preview", response_model=None,
+    summary="The print model the renderer would use, with readiness and preview fingerprint",
+    **wire.read(Preview, wire.PREVIEW),
+)
+async def preview(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         params = query_params(request, frozenset({"variant"}))
@@ -271,9 +305,13 @@ async def preview(course_id: str, exam_id: str, request: Request, user: CurrentU
     return await guarded(run, "exams.preview")
 
 
-@router.post("/courses/{course_id}/exams/{exam_id}/finalize", response_model=None, responses={**_ERRORS, 200: {"model": Exam}},
-             summary="Finalize the reviewed draft (If-Match + preview_fingerprint)")  # fmt: skip
-async def finalize_exam(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.post(
+    "/courses/{course_id}/exams/{exam_id}/finalize", response_model=None,
+    summary="Finalize the reviewed draft (If-Match + preview_fingerprint)",
+    **wire.mutation(Exam, wire.FINALIZE, replay=True, invalid="invalid_blueprint_override blueprint_override_not_needed",
+                    conflicts="exam_not_draft exam_not_ready finalize_intent_mismatch export_budget_exceeded"),
+)
+async def finalize_exam(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         state = request.app.state
@@ -297,9 +335,12 @@ async def finalize_exam(course_id: str, exam_id: str, request: Request, user: Cu
     return await guarded(run, "exams.finalize")
 
 
-@router.post("/courses/{course_id}/exams/{exam_id}/archive", response_model=None, responses={**_ERRORS, 200: {"model": Exam}},
-             summary="Archive a draft or finalized exam (If-Match)")  # fmt: skip
-async def archive_exam(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.post(
+    "/courses/{course_id}/exams/{exam_id}/archive", response_model=None,
+    summary="Archive a draft or finalized exam (If-Match)",
+    **wire.mutation(Exam, wire.EMPTY, replay=True),
+)
+async def archive_exam(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         state = request.app.state
@@ -312,9 +353,13 @@ async def archive_exam(course_id: str, exam_id: str, request: Request, user: Cur
     return await guarded(run, "exams.archive")
 
 
-@router.post("/courses/{course_id}/exams/{exam_id}/duplicate", status_code=201, response_model=None,
-             responses={**_ERRORS, 201: {"model": DuplicateResponse}}, summary="Duplicate as a new draft (Idempotency-Key)")  # fmt: skip
-async def duplicate_exam(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.post(
+    "/courses/{course_id}/exams/{exam_id}/duplicate", response_model=None, status_code=201,
+    summary="Duplicate as a new draft (Idempotency-Key)",
+    **wire.mutation(DuplicateResponse, wire.DUPLICATE, keyed=True, invalid="invalid_exam",
+                    conflicts="idempotency_key_reused exam_limit_reached export_budget_exceeded"),
+)
+async def duplicate_exam(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         state = request.app.state
@@ -327,9 +372,12 @@ async def duplicate_exam(course_id: str, exam_id: str, request: Request, user: C
     return await guarded(run, "exams.duplicate")
 
 
-@router.get("/courses/{course_id}/exams/{exam_id}/history", response_model=None, responses={**_ERRORS, 200: {"model": AuditList}},
-            summary="Audit events of the exam, its items and exports, newest first")  # fmt: skip
-async def exam_history(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.get(
+    "/courses/{course_id}/exams/{exam_id}/history", response_model=None,
+    summary="Audit events of the exam, its items and exports, newest first",
+    **wire.read(AuditList, wire.PAGE),
+)
+async def exam_history(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     async def run():
         course = await authorize(request, user, course_id)
         params = query_params(request, frozenset({"limit", "cursor"}))
@@ -379,17 +427,19 @@ async def _file(request: Request, user: CurrentUser, course_id: str, exam_id: st
     return export.file_response(meta, rendered, variant, fmt)
 
 
-_FILE_RESPONSES = {**_ERRORS, 200: {"content": {"application/pdf": {}, "application/vnd.openxmlformats-officedocument."
-                                                "wordprocessingml.document": {}}, "description": "The file"}}  # fmt: skip
-
-
-@router.get("/courses/{course_id}/exams/{exam_id}/export", response_model=None, responses=_FILE_RESPONSES,
-            summary="Official PDF or DOCX of a finalized exam (student version or answer key)")  # fmt: skip
-async def export_exam(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.get(
+    "/courses/{course_id}/exams/{exam_id}/export", response_model=None,
+    summary="Official PDF or DOCX of a finalized exam (student version or answer key)",
+    **wire.download(),
+)
+async def export_exam(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     return await guarded(lambda: _file(request, user, course_id, exam_id, preview_file=False), "exams.export")
 
 
-@router.get("/courses/{course_id}/exams/{exam_id}/preview-file", response_model=None, responses=_FILE_RESPONSES,
-            summary="Watermarked draft file (or the finalized file) for review")  # fmt: skip
-async def preview_file(course_id: str, exam_id: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+@router.get(
+    "/courses/{course_id}/exams/{exam_id}/preview-file", response_model=None,
+    summary="Watermarked draft file (or the finalized file) for review",
+    **wire.download(draft=True),
+)
+async def preview_file(course_id: ResourceId, exam_id: ResourceId, request: Request, user: CurrentUser = Depends(get_current_user)):
     return await guarded(lambda: _file(request, user, course_id, exam_id, preview_file=True), "exams.preview_file")

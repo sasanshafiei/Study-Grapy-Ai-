@@ -37,7 +37,7 @@ def test_fp10_fingerprint_object_is_canonical_versioned_and_content_free():
     item = SimpleNamespace(id=uuid.uuid4(), position=1, points=2, blueprint_row_id=None, question_id=uuid.uuid4(),
                            question_status="approved", approved_revision_no=1, approved_content_sha256="a" * 64)  # fmt: skip
     obj = snapshot.fingerprint_object(exam, course, [], [item])
-    assert set(obj) == {"v", "exam", "course", "items", "blueprint"} and obj["v"] == 1
+    assert set(obj) == {"v", "exam", "course", "items", "blueprint"} and obj["v"] == 2
     assert set(obj["items"][0]) == {"id", "position", "points", "blueprint_row_id", "question_id", "question_status",
                                     "approved_revision_no", "approved_content_sha256"}  # fmt: skip
     digest = snapshot.digest(obj)

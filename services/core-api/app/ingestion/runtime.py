@@ -57,20 +57,20 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import URL, Connection, Engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 from .. import storage_identity
 from ..config import Settings
+from ..database_compatibility import REQUIRED_SCHEMA_REVISION, IncompatibleDatabase, check_database_compatibility
 from ..migration_safety import UnsafeMigrationTarget, describe_target, resolve_migration_url, verify_connection
 from ..storage import LocalFileStorage
 from ..indexing.client import AiIndexClient, InvalidServiceUrl, parse_service_url
 from .dispatch import CeleryPublisher
 from .pipeline import WorkerContext
 
-REQUIRED_SCHEMA_REVISION = "0008"
 REQUIRE_COMMENT_ENV = "DATABASE_REQUIRE_COMMENT"
 WORKER_ENVIRONMENT = ("DATABASE_URL", "REDIS_URL", "UPLOAD_DIR")
 BEAT_ENVIRONMENT = ("REDIS_URL",)
@@ -141,26 +141,15 @@ def verified_engine(target: DatabaseTarget) -> Engine:
 
 
 def check_database(target: DatabaseTarget) -> None:
-    """Reach the target through a verified connection and check its schema revision."""
+    """Check application compatibility on an identity-verified worker connection."""
     engine = verified_engine(target)
     try:
         with engine.connect() as connection:
-            exists = connection.execute(text("SELECT to_regclass('public.alembic_version') IS NOT NULL")).scalar_one()
-            revision = (
-                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
-                if exists
-                else None
-            )
-            connection.rollback()
-    except UnsafeMigrationTarget as exc:
+            check_database_compatibility(connection)
+    except (UnsafeMigrationTarget, IncompatibleDatabase) as exc:
         raise PreflightError(str(exc)) from None
     finally:
         engine.dispose()
-    if revision != REQUIRED_SCHEMA_REVISION:
-        raise PreflightError(
-            f"database schema is at {revision or 'no revision'}, this worker needs {REQUIRED_SCHEMA_REVISION}; "
-            "run the migration first (workers never migrate)"
-        )
 
 
 def worker_preflight(settings: Settings, environ: Mapping[str, str] = os.environ) -> None:

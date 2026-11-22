@@ -1,0 +1,23 @@
+name: Internal AI contract
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CE consumer and contract test dependencies
+        run: python -m pip install -r services/core-api/requirements-dev.txt -r contracts/requirements-test.txt
+      - name: Validate the shared OpenAPI, fixtures, mock and CE consumers
+        run: PYTHONPATH=services/core-api python -m pytest -q contracts/tests
+      - name: Exercise the packaged mock using its own runtime
+        run: |
+          docker build -t studygraph-ai-contract -f services/ai-service/Dockerfile .
+          docker run --rm --network none -i studygraph-ai-contract python - < contracts/tests/check_mock_image.py

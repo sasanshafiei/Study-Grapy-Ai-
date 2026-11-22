@@ -8,9 +8,20 @@ as in the contract examples.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_serializer
+from pydantic import BaseModel, ConfigDict, WithJsonSchema, model_serializer
+
+from ..exams.validation import CHOICE_LABELS, MAX_MODEL_ANSWER, MAX_RUBRIC
+from .openapi import enum, exact, nullable, text_field
+
+MCQ_ID = enum(*CHOICE_LABELS)
+MCQ_KEY = exact(choice_id=MCQ_ID)
+TF_KEY = exact(choice_id=enum("true", "false"))
+SHORT_KEY = exact(model_answer=text_field(MAX_MODEL_ANSWER), rubric=nullable(text_field(MAX_RUBRIC, 0)))
+ANSWER_KEY = {"oneOf": [MCQ_KEY, TF_KEY, SHORT_KEY]}
+
+AnswerKey = Annotated[dict[str, Any], WithJsonSchema(ANSWER_KEY)]
 
 Status = Literal["draft", "approved", "retired"]
 QType = Literal["mcq", "true_false", "short"]
@@ -73,7 +84,7 @@ class ExamQuestion(_Strict):
     topic: Topic | None
     stem: str
     choices: list[Choice] | None
-    answer_key: dict[str, Any]
+    answer_key: AnswerKey
     explanation: str | None
     source_refs: list[SourceRef]
     approved_revision: int | None
@@ -127,7 +138,7 @@ class QuestionRevision(_Strict):
     topic: Topic | None
     stem: str
     choices: list[Choice] | None
-    answer_key: dict[str, Any]
+    answer_key: AnswerKey
     explanation: str | None
     source_refs: list[RevisionSource]
 
@@ -186,7 +197,7 @@ class ItemQuestion(_Strict):
     topic: Topic | None
     stem: str
     choices: list[Choice] | None
-    answer_key: dict[str, Any]
+    answer_key: AnswerKey
     explanation: str | None
     source_refs: list[SourceRef]
 
@@ -381,6 +392,12 @@ class PreviewReadiness(_Strict):
 
 
 class Preview(_Strict):
+    # Both variants share this runtime model. The print path chooses exactly one answer-key shape.
+    model_config = ConfigDict(json_schema_extra={"oneOf": [
+        {"properties": {"variant": {"const": "student"}, "answer_key": {"type": "null"}}},
+        {"properties": {"variant": {"const": "answer_key"}, "answer_key": {"type": "array", "items": {}}}},
+    ]})
+
     exam_id: str
     status: Literal["draft", "finalized", "archived"]
     version: int

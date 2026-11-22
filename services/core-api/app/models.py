@@ -679,8 +679,42 @@ class ExternalDocumentVersion(Base):
 
 # --- The one index --------------------------------------------------------
 
+class IndexGeneration(Base):
+    __tablename__ = "index_generations"
+    __table_args__ = (
+        ForeignKeyConstraint(["document_id", "course_id"], ["documents.id", "documents.course_id"],
+                             name="index_generations_document_course_fkey", ondelete="CASCADE"),
+        UniqueConstraint("document_id", "course_id", "idempotency_key", name="index_generations_identity_key"),
+        CheckConstraint("section_count > 0 AND chunk_count >= section_count", name="counts"),
+        CheckConstraint("content_digest ~ '^[0-9a-f]{64}$' AND idempotency_key ~ '^[0-9a-f]{64}$'", name="hashes"),
+        CheckConstraint("model_name ~ '^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,99}$' AND "
+                        "model_version ~ '^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,99}$'", name="model"),
+    )
+
+    document_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    course_id: Mapped[uuid.UUID]
+    idempotency_key: Mapped[str] = mapped_column(String(64), unique=True)
+    content_digest: Mapped[str] = mapped_column(String(64))
+    section_count: Mapped[int]
+    chunk_count: Mapped[int]
+    model_name: Mapped[str] = mapped_column(String(100))
+    model_version: Mapped[str] = mapped_column(String(100))
+    committed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("clock_timestamp()"))
+
+
 class Chunk(Base):
     __tablename__ = "chunks"
+    __table_args__ = (
+        UniqueConstraint("id", "course_id"),
+        ForeignKeyConstraint(["document_id", "course_id", "generation_key"],
+                             ["index_generations.document_id", "index_generations.course_id",
+                              "index_generations.idempotency_key"], name="chunks_generation_fkey", ondelete="CASCADE"),
+        CheckConstraint("(generation_key IS NULL AND section_ordinal IS NULL) OR "
+                        "(generation_key IS NOT NULL AND course_id IS NOT NULL AND section_ordinal IS NOT NULL "
+                        "AND section_ordinal >= 0 AND embedding IS NOT NULL AND vector_norm(embedding) > 0 "
+                        "AND locator IS NOT NULL AND text ~ '[^[:space:]]')", name="generation"),
+        Index(None, "document_id", "generation_key"),
+    )
 
     id: Mapped[uuid.UUID] = pk()
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id"))
@@ -689,8 +723,8 @@ class Chunk(Base):
     text: Mapped[str] = mapped_column(Text)
     locator: Mapped[dict] = mapped_column(JSONB, nullable=True)  # {"page": 6} or {"heading": "4.4"}
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBED_DIM), nullable=True)
-    # A generated tsvector for sparse/keyword search is added via migration;
-    # keeping it out of the ORM keeps this file simple. See README.
+    generation_key: Mapped[str | None] = mapped_column(String(64))
+    section_ordinal: Mapped[int | None]
 
 
 class Topic(Base):
@@ -705,11 +739,18 @@ class Topic(Base):
 
 class ChunkTopic(Base):
     __tablename__ = "chunk_topics"
-    __table_args__ = (UniqueConstraint("chunk_id", "topic_id"),)
+    __table_args__ = (
+        UniqueConstraint("chunk_id", "topic_id"),
+        ForeignKeyConstraint(["chunk_id", "course_id"], ["chunks.id", "chunks.course_id"],
+                             name="chunk_topics_chunk_course_fkey", ondelete="CASCADE"),
+        ForeignKeyConstraint(["topic_id", "course_id"], ["topics.id", "topics.course_id"],
+                             name="chunk_topics_topic_course_fkey"),
+    )
 
     id: Mapped[uuid.UUID] = pk()
     chunk_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chunks.id"))
     topic_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("topics.id"))
+    course_id: Mapped[uuid.UUID | None]
 
 
 # --- Practice & learner model --------------------------------------------

@@ -41,15 +41,30 @@ check everything is wired:
 
 ```bash
 docker compose exec core-api alembic upgrade head
-docker compose exec core-api alembic current   # expect: 0004 (head)
+docker compose exec core-api alembic current   # expect: 0009 (head) for this version
 docker compose exec core-api python -m app.ingestion.admin init-storage --database studygraph   # once
 
-curl localhost:8000/health        # core-api up
-curl localhost:8000/health/db     # db reachable + pgvector installed
+curl localhost:8000/health        # core-api process liveness
+curl localhost:8000/health/db     # database connectivity and pgvector diagnostic
+curl --fail localhost:8000/health/ready  # core-api readiness for traffic
 curl localhost:8001/health        # mock ai-service up
 ```
 
-The document workers (`worker`, `worker-maintenance`, `beat`) exit until the schema
+| Core API probe | Meaning |
+| --- | --- |
+| `GET /health` | Returns 200 when the HTTP process can respond. It makes no dependency calls. Use it for liveness. |
+| `GET /health/db` | Returns 200 when the database queries succeed, with `pgvector_installed` set to true or false. It can return 200 on older revisions. A database query failure returns the existing generic 500. |
+| `GET /health/ready` | Returns 200 with `{"status":"ready"}` when the app's database connection uses the public schema, pgvector is installed there, and `public.alembic_version` contains exactly the required revision. Connection, query, extension and compatibility failures return 503 with code `not_ready`. Both responses use `Cache-Control: no-store`. |
+
+Compose probes the core API through `/health/ready`. The PostgreSQL service uses `pg_isready`
+for database startup. Core readiness checks the recorded migration revision on every request.
+It performs no migrations or table-by-table drift audit. Redis delivery, upload storage and AI
+providers have feature-specific checks. Their availability does not gate core traffic.
+The API role needs usage on `public` and read access to `public.alembic_version`.
+The probe sets a two-second SQL statement timeout. Connection and pool acquisition use the
+application engine's settings. Configure deployment connection and probe timeouts accordingly.
+
+The document workers (`worker`, `worker-maintenance`) exit until the schema
 is at head; restart them after migrating (`docker compose up -d`). Redis is not
 published on the host (the workers trust what it hands them); see
 [docs/document-processing.md](docs/document-processing.md). The index worker

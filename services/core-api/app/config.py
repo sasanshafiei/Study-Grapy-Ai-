@@ -26,7 +26,6 @@ class Settings(BaseSettings):
     redis_url: SecretStr = SecretStr("redis://redis:6379/0")
     ai_service_url: str = "http://ai-service:8000"
     environment: str = "development"
-
     # Root of the uploaded-file store. docker-compose mounts the persistent
     # `uploads` volume here; nothing creates or touches it until the first upload.
     upload_dir: Path = Path("/data/uploads")

@@ -19,7 +19,8 @@ from app.celery_app import make_celery
 from app.ingestion import dispatch, jobs
 from app.ingestion.dispatch import CeleryPublisher
 from app.storage import LocalFileStorage
-from tests.fake_ai_service import TOKEN, FakeAiService
+from tests.index_writer import persist
+from tests.fake_ai_service import TOKEN, FakeAiService, Fault
 from tests.pdf_samples import build_pdf, text_page
 from tests.worker_support import add_stored_document, document_row, index_jobs, job_row, start_beat, start_worker, wait_for
 
@@ -43,8 +44,8 @@ def store(infra):
 
 
 @pytest.fixture
-def fake():
-    service = FakeAiService().start()
+def fake(world):
+    service = FakeAiService(persist=lambda body: persist(world.engine, body)).start()
     yield service
     service.stop()
 
@@ -184,17 +185,24 @@ def test_index_worker_refuses_to_start_on_bad_configuration(infra, celery_proces
     assert "start-up check failed" in worker.log()
 
 
+@pytest.mark.parametrize("after_commit", [False, True], ids=["before-commit", "after-commit"])
 def test_lost_response_and_dead_worker_recover_with_the_same_key(
-    world, infra, celery_processes, add, publisher, fake, ai_env, settings
+    world, infra, celery_processes, add, publisher, fake, ai_env, settings, after_commit
 ):
     """A worker killed while its request is in flight: lease recovery requeues, the replay commits nothing new."""
     [(document_id, index_job)] = _parsed(world, infra, celery_processes, add, publisher)
-    fake.block()
+    if after_commit:
+        fake.faults.append(Fault("hold_after_commit"))
+    else:
+        fake.block()
     worker = start_worker(infra, "index", [infra.index_queue], **ai_env)
     celery_processes.append(worker)
     worker.wait_ready()
     publisher.publish_index(index_job)
     wait_for(fake.blocked.is_set, 30, what="the request to be in flight")
+    if after_commit:
+        assert world.scalar("SELECT chunk_count FROM index_generations WHERE document_id=:d", d=document_id) > 0
+        assert document_row(world.engine, document_id)["status"] == "pending"
     worker.signal(signal.SIGKILL)
     worker.proc.wait(10)
     fake.release()  # the fake commits, then finds nobody to answer: a lost response

@@ -2,10 +2,9 @@
 
 The key row is written in the same transaction as the resource it created. A replay with the same
 fingerprint (course, operation and canonical body) returns the resource's current representation; a
-different fingerprint is 409 idempotency_key_reused. Two concurrent creates with one key: the second
-INSERT waits for the first transaction on the primary key and then finds the row (ON CONFLICT DO
-NOTHING on the primary key; never on a position constraint); its own transaction is rolled back and it
-replays.
+different fingerprint is 409 idempotency_key_reused. After an initial miss, creates recheck the key
+under the course capacity lock. The per-user primary key also handles concurrent uses of a key across
+different capacity locks.
 """
 
 from __future__ import annotations
@@ -38,6 +37,15 @@ def lookup(session: Session, user_id: uuid.UUID, key: uuid.UUID, operation: str,
     if row.operation != operation or row.request_fingerprint != print_:
         raise ApiError(409, "idempotency_key_reused", "This Idempotency-Key was already used for a different request.")
     return row.resource_id
+
+
+def lock_capacity_for_create(session: Session, course_id: uuid.UUID, user_id: uuid.UUID, key: uuid.UUID,
+                             operation: str, print_: str) -> None:
+    scope = "exam-bank-limit" if operation == "question_create" else "exam-limit"
+    session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": f"{scope}:{course_id}"})
+    # A separate READ COMMITTED statement sees the creator that committed while we waited.
+    if lookup(session, user_id, key, operation, print_) is not None:
+        raise KeyTaken()
 
 
 def store(session: Session, user_id, key, operation, print_, course_id, resource_id) -> None:

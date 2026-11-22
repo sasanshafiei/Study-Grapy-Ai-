@@ -27,19 +27,21 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..auth import CurrentUser, get_current_user
 from ..dashboard import analytics, student, study_events
-from ..dashboard.timezones import InvalidTimezone, parse_timezone
+from ..dashboard.timezones import MAX_ZONE_CHARS, InvalidTimezone, parse_timezone
 from ..errors import ApiError
 from ..json_body import read_json_object
 from ..quiz.diagnostics import describe, internal_error
 from ..schemas.dashboard import AnalyticsResponse, DashboardResponse, StudyEventsResponse
 from ..schemas.documents import ErrorBody
+from ..schemas.openapi import BEARER, INTEGER, STRING, UUID, array, enum, exact, json_body, nullable, query, validation_error
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["dashboard"])
 
 NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 _ERRORS: dict[int | str, dict[str, Any]] = {
-    status: {"model": ErrorBody} for status in (400, 401, 403, 404, 408, 409, 413, 415, 422, 429, 503)
+    **{status: {"model": ErrorBody} for status in (403, 404, 500, 503)},
+    401: {"model": ErrorBody, "headers": BEARER}, 422: validation_error(),
 }
 
 
@@ -72,6 +74,8 @@ def _query(request: Request, allowed: frozenset[str]) -> dict[str, str]:
 @router.get(
     "/courses/{course_id}/dashboard",
     responses={**_ERRORS, 200: {"model": DashboardResponse}},
+    openapi_extra={"parameters": [query("tz", {**STRING, "default": "UTC", "maxLength": MAX_ZONE_CHARS},
+                                       "IANA time zone for dashboard day boundaries, e.g. Europe/Istanbul.")]},
     summary="The caller's learning dashboard for one course (student)",
     response_model=None,
 )
@@ -117,20 +121,26 @@ async def course_analytics(course_id: uuid.UUID, request: Request, user: Current
     return await _guarded(run, "analytics")
 
 
-_STUDY_EVENTS_BODY = {
-    "requestBody": {
-        "required": True,
-        "content": {"application/json": {"schema": {
-            "type": "object", "required": ["events"], "additionalProperties": False,
-            "properties": {"events": {"type": "array", "minItems": 1, "maxItems": 25, "items": {"type": "object"}}},
-        }}},
-    }
-}  # fmt: skip
+_TIME = {**STRING, "format": "date-time", "description": "RFC 3339 with offset and at most six fractional digits."}
+_EVENT = {"oneOf": [
+    exact(type=enum("document_viewed"), client_event_id=UUID, occurred_at=_TIME, document_id=UUID),
+    exact(type=enum(*study_events.RECOMMENDATION_EVENTS), client_event_id=UUID, occurred_at=_TIME,
+          recommendation_id={**STRING, "pattern": "^[0-9a-f]{16}$"},
+          recommendation_type=enum(*study_events.RECOMMENDATION_TYPES), topic_id=nullable(UUID), target_document_id=nullable(UUID)),
+    exact(type=enum("focus_interval"), client_event_id=UUID, started_at=_TIME, ended_at=_TIME,
+          surface=enum(*study_events.SURFACES), topic_id=nullable(UUID), document_id=nullable(UUID)),
+]}
+_STUDY_EVENTS_BODY = json_body(exact(events=array(_EVENT, minItems=1,
+    description="Distinct client_event_ids. Batch limit defaults to 25 (STUDY_EVENTS_MAX_BATCH). Times within the past 24 hours.")))
+_INDEX_ERROR = exact(code=enum("invalid_study_event"), detail=STRING, index=INTEGER)
 
 
 @router.post(
     "/courses/{course_id}/study-events",
-    responses={**_ERRORS, 200: {"model": StudyEventsResponse}},
+    responses={**_ERRORS, **{status: {"model": ErrorBody} for status in (400, 408, 413, 415, 429)},
+               409: {"description": "event_id_conflict", "content": {"application/json": {"schema":
+                     exact(code=enum("event_id_conflict"), detail=STRING, index=INTEGER)}}},
+               422: validation_error(_INDEX_ERROR), 200: {"model": StudyEventsResponse}},
     summary="Record client-reported study activity (student; idempotent per client_event_id)",
     openapi_extra=_STUDY_EVENTS_BODY,
     response_model=None,

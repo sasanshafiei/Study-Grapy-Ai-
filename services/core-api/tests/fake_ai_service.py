@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
+from collections.abc import Callable
 import threading
 import time
 from dataclasses import dataclass, field
@@ -91,6 +92,7 @@ class FakeAiService:
     faults: list[Fault] = field(default_factory=list)
     locators: list[str] | None = None
     unadvertised_section_requests: int = 0
+    persist: Callable | None = None
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
@@ -247,25 +249,37 @@ class _Handler(BaseHTTPRequestHandler):
         ):
             self._error(400, "inconsistent_request", False)
             return
-        with self.fake._commit_lock:  # one decision at a time: same key replays, other keys cannot also commit
-            existing = self.fake.commits.get(key)
-            replayed = existing is not None
-            if existing is None:
-                generation = self.fake.generations.get(document["id"])
-                if generation is not None:
-                    refused = (
-                        "course_mismatch" if generation.course_id != document["course_id"] else "generation_conflict"
-                    )
-                else:
-                    refused = None
-                    existing = Commit(key, digest, document["id"], document["course_id"], len(sections), len(sections))
-                    with self.fake._lock:
-                        self.fake.commits[key] = existing
-                        self.fake.generations[document["id"]] = existing
-                        self.fake.commit_count += 1
+        if self.fake.persist is not None:
+            # The SQL transaction commits on another connection before the receipt or scripted loss.
+            count, replayed = self.fake.persist(request)
+            existing = Commit(key, digest, document["id"], document["course_id"], len(sections), count)
+            with self.fake._lock:
+                self.fake.commits[key] = existing  # observations for assertions only
+                self.fake.commit_count += int(not replayed)
+        else:
+            with self.fake._commit_lock:  # one decision at a time: same key replays, other keys cannot also commit
+                existing = self.fake.commits.get(key)
+                replayed = existing is not None
+                if existing is None:
+                    generation = self.fake.generations.get(document["id"])
+                    if generation is not None:
+                        refused = (
+                            "course_mismatch" if generation.course_id != document["course_id"] else "generation_conflict"
+                        )
+                    else:
+                        refused = None
+                        existing = Commit(key, digest, document["id"], document["course_id"], len(sections), len(sections))
+                        with self.fake._lock:
+                            self.fake.commits[key] = existing
+                            self.fake.generations[document["id"]] = existing
+                            self.fake.commit_count += 1
         if existing is None:
             self._error(409, refused, False)
             return
+        if fault is not None and fault.kind == "hold_after_commit":
+            self.fake.gate.clear()
+            self.fake.blocked.set()
+            self.fake.gate.wait(600)
         if fault is not None and fault.kind == "lose_after_commit":
             self._drop()
             return

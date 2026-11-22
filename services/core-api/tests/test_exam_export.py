@@ -113,6 +113,32 @@ def test_exp03_exp15_student_file_has_no_answer_only_content_anywhere(exp, fmt):
         assert pdf_active_content(data) == set()
 
 
+@pytest.mark.parametrize("fmt", ["pdf", "docx"])
+def test_f07_reviewed_file_matches_official_citation_after_source_rename(exp, fmt):
+    x, c, world, doc = exp["x"], exp["c"], exp["world"], exp["document"]
+    ref = {"document_id": str(doc), "locator": {"page": 4}}
+    q = x.question(mcq_body(source_refs=[ref], explanation="ANSWERONLY-EXPL-review"), approve=True)
+    world.execute("UPDATE documents SET title = 'Renamed.pdf' WHERE id = :d", d=doc)
+    draft = x.add(x.exam(), q)
+    reviewed = _get(c, x, draft, "answer_key", fmt, "/preview-file")
+    student_preview = _get(c, x, draft, "student", fmt, "/preview-file")
+    assert reviewed.status_code == 200
+    final = x.finalized(draft, fingerprint=reviewed.headers["x-exam-preview-fingerprint"])
+    official = _get(c, x, final, "answer_key", fmt)
+    assert official.status_code == 200
+    for response in (official, reviewed):
+        key_text = _text(fmt, response.content)
+        assert "ANSWERONLY-SRC-lecture.pdf, p. 4" in key_text
+        assert "Renamed.pdf" not in key_text
+        assert final["content_sha256"][:12] in key_text
+
+    for student in (student_preview, _get(c, x, final, "student", fmt)):
+        assert student.status_code == 200
+        student_text = _text(fmt, student.content)
+        assert q["stem"] in student_text
+        assert all(marker not in student_text for marker in (*CANARIES, "Renamed.pdf"))
+
+
 def test_exp04_choices_share_one_style(exp):
     import pypdf
 

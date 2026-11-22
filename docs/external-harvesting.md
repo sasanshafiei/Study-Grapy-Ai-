@@ -125,8 +125,8 @@ NFC-normalized, control characters removed, whitespace collapsed (`derive_query`
 
 ### Proposed `studygraph.topics/1` (not implemented; AI-2 owns the endpoint)
 
-`POST /ai/v1/topics/extract` (path already listed in `contracts/ai-service.openapi.yaml`;
-the shared contract is **not** changed here). Proposal:
+The proposed `POST /ai/v1/topics/extract` exchange is deferred in the
+[provider handoff](ai-provider-handoff.md#future-interfaces).
 
 ```json
 {"protocol": "studygraph.topics/1", "course_id": "<uuid>",

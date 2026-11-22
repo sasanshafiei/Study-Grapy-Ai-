@@ -156,6 +156,9 @@ def index_job_of(world, document_id):
 
 def index_now(factory, world, document_id):
     """Claim the document's queued index job and complete it with the digest of what is stored (real path)."""
+    import json
+
+    from tests.index_writer import persist
     from app.indexing.payload import request_for
     from app.ingestion import jobs
 
@@ -165,9 +168,10 @@ def index_now(factory, world, document_id):
         session.commit()
     assert claim is not None
     with factory() as session:
-        digest = request_for(session, document_id).content_digest
+        request = request_for(session, document_id)
         session.rollback()
-    return jobs.complete_index(factory, claim, digest)
+    count, _ = persist(world.engine, json.loads(request.body))
+    return jobs.complete_index(factory, claim, request.content_digest, count)
 
 
 # --- fake provider ----------------------------------------------------------------------------------

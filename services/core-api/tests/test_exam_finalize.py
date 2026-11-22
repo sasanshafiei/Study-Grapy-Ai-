@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 
+from app.exams import snapshot
 from tests import exam_support as ex
 from tests.exam_support import ExamClient, key, match, mcq_body, row, short_body, tf_body
 
@@ -340,3 +341,81 @@ def test_src01_finalized_exam_keeps_frozen_titles(fx):
     assert x.preview(final, "answer_key")["answer_key"][0]["sources"] == ["Lecture_04.pdf, p. 2"]
     assert x.get(final)["items"][0]["question"]["source_refs"][0]["title"] == "Lecture_04.pdf"
     assert x.get(final)["content_sha256"] == final["content_sha256"]
+
+
+def test_f07_reviewed_citation_matches_finalization_while_editor_tracks_the_source(fx):
+    x, world, doc = fx["x"], fx["world"], fx["document"]
+    ref = {"document_id": str(doc), "locator": {"page": 2}}
+    q = x.question(mcq_body(source_refs=[ref]), approve=True)
+    revision = fx["c"].get(x.q_path(q["id"], "/revisions")).json()["items"][0]
+    frozen = revision["source_refs"][0]
+    assert (frozen["title"], frozen["locator_label"]) == ("Lecture_04.pdf", "p. 2")
+
+    world.execute("UPDATE documents SET title = 'Renamed.pdf' WHERE id = :d", d=doc)
+    draft = x.add(x.exam(), q)
+    editor_ref = draft["items"][0]["question"]["source_refs"][0]
+    assert (editor_ref["title"], editor_ref["available"]) == ("Renamed.pdf", True)
+    reviewed = x.preview(draft, "answer_key")
+
+    world.execute("DELETE FROM documents WHERE id = :d", d=doc)
+    editor_ref = x.get(draft)["items"][0]["question"]["source_refs"][0]
+    assert (editor_ref["title"], editor_ref["available"]) == (None, False)
+    after_removal = x.preview(draft, "answer_key")
+    final = x.finalized(draft, fingerprint=reviewed["preview_fingerprint"])
+    official = x.preview(final, "answer_key")
+    assert official["answer_key"][0]["sources"] == [f"{frozen['title']}, {frozen['locator_label']}"]
+    assert reviewed["answer_key"] == official["answer_key"]
+    assert after_removal == reviewed
+    assert reviewed["questions"] == official["questions"]
+    assert draft["content_chars"] == final["content_chars"]
+    final_ref = final["items"][0]["question"]["source_refs"][0]
+    assert (final_ref["title"], final_ref["available"]) == (frozen["title"], False)
+
+
+def test_f07_edit_revokes_approval_and_reapproval_selects_the_new_revision(fx):
+    x, world, doc = fx["x"], fx["world"], fx["document"]
+    body = mcq_body(source_refs=[{"document_id": str(doc), "locator": {"page": 2}}])
+    q = x.question(body, approve=True)
+    old_final = x.finalized(x.add(x.exam(), q))
+    draft = x.add(x.exam("Second exam"), q)
+    old_review = x.preview(draft, "answer_key")
+    world.execute("UPDATE documents SET title = 'Second.pdf' WHERE id = :d", d=doc)
+    edited = x.edit(q, {**body, "stem": "Updated working copy?"})
+    review = x.preview(draft, "answer_key")
+    assert review["questions"][0]["stem"] == "Updated working copy?"
+    assert review["answer_key"][0]["sources"] == ["Second.pdf, p. 2"]
+    assert x.preview(draft)["questions"] == review["questions"]
+    assert x.finalize(draft, fingerprint=review["preview_fingerprint"]).json()["code"] == "exam_not_ready"
+    x.approve(edited)
+    world.execute("UPDATE documents SET title = 'Third.pdf' WHERE id = :d", d=doc)
+    assert x.finalize(draft, fingerprint=old_review["preview_fingerprint"]).json()["code"] == "exam_preview_stale"
+    reviewed = x.preview(draft, "answer_key")
+    final = x.finalized(draft, fingerprint=reviewed["preview_fingerprint"])
+    assert final["items"][0]["pinned_revision"] == 2
+    assert reviewed["answer_key"] == x.preview(final, "answer_key")["answer_key"] == review["answer_key"]
+    assert x.preview(old_final, "answer_key")["answer_key"] == old_review["answer_key"]
+
+
+def test_f07_pre_fix_draft_requires_review_but_committed_finalize_can_replay(fx, monkeypatch):
+    x = fx["x"]
+    ref = {"document_id": str(fx["document"]), "locator": {"page": 2}}
+    q = x.question(mcq_body(source_refs=[ref]), approve=True)
+    fx["world"].execute("UPDATE documents SET title = 'Renamed.pdf' WHERE id = :d", d=fx["document"])
+    draft = x.add(x.exam(), q)
+    completed = x.add(x.exam("Already finalized"), q)
+
+    # Mint both intents with the old canonical input, exactly as an older server did.
+    current_object = snapshot.fingerprint_object
+    with monkeypatch.context() as old_server:
+        old_server.setattr(snapshot, "fingerprint_object", lambda *args: {**current_object(*args), "v": 1})
+        old_review = x.preview(draft, "answer_key")["preview_fingerprint"]
+        completed_review = x.preview(completed, "answer_key")["preview_fingerprint"]
+        x.finalized(completed, fingerprint=completed_review)
+
+    stale = x.finalize(draft, fingerprint=old_review)
+    assert stale.status_code == 412 and stale.json()["code"] == "exam_preview_stale"
+    assert x.get(draft)["status"] == "draft"
+    fresh = x.preview(draft, "answer_key")
+    assert x.finalized(draft, fingerprint=fresh["preview_fingerprint"])["status"] == "finalized"
+    replay = x.finalize(completed, fingerprint=completed_review)
+    assert replay.status_code == 200 and replay.headers["idempotent-replayed"] == "true"

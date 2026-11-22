@@ -19,13 +19,15 @@ from starlette.concurrency import run_in_threadpool
 from ..auth import CurrentUser, get_current_user
 from ..ingestion import dispatch
 from ..schemas.documents import DocumentItem, DocumentUploadResponse, DuplicateDocumentBody, ErrorBody
+from ..schemas.openapi import BEARER, validation_error
 from ..services import documents
-from ..uploads import FILE_FIELD, read_upload_form
+from ..uploads import FILE_FIELD, MAX_FORM_FIELDS, read_upload_form
 
 router = APIRouter(prefix="/api/v1", tags=["documents"])
 
 _ERRORS: dict[int | str, dict[str, Any]] = {
-    401: {"model": ErrorBody, "description": "Not signed in"},
+    500: {"model": ErrorBody},
+    401: {"model": ErrorBody, "description": "Not signed in", "headers": BEARER},
     403: {"model": ErrorBody, "description": "Account disabled, or not allowed to do this in the course"},
     404: {"model": ErrorBody, "description": "Course not found (or not visible to the caller)"},
 }
@@ -38,6 +40,8 @@ _UPLOAD_BODY = {
                 "schema": {
                     "type": "object",
                     "required": [FILE_FIELD],
+                    "maxProperties": 1 + MAX_FORM_FIELDS,
+                    "additionalProperties": {"type": "string", "description": "Additional text fields are ignored."},
                     "properties": {
                         FILE_FIELD: {
                             "type": "string",
@@ -55,7 +59,7 @@ _UPLOAD_BODY = {
 @router.get(
     "/courses/{course_id}/documents",
     response_model=list[DocumentItem],
-    responses=_ERRORS,
+    responses={**_ERRORS, 503: {"model": ErrorBody, "description": "database_unavailable"}},
     summary="List a course's materials",
 )
 def list_course_documents(
@@ -74,7 +78,7 @@ def list_course_documents(
         409: {"model": DuplicateDocumentBody, "description": "The same file is already in this course"},
         413: {"model": ErrorBody, "description": "File larger than the limit"},
         415: {"model": ErrorBody, "description": "Not a PDF, or not multipart/form-data"},
-        422: {"model": ErrorBody, "description": "Missing, empty or invalid file"},
+        422: validation_error(),
         503: {"model": ErrorBody, "description": "Outcome could not be confirmed, or uploads are unavailable"},
     },
     openapi_extra=_UPLOAD_BODY,

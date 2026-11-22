@@ -344,7 +344,7 @@ def test_document_routes_and_openapi_contract(api):
     # No legacy /documents/upload route and nothing outside /api/v1 besides health.
     paths = set(schema["paths"])
     assert "/documents/upload" not in paths
-    assert {p for p in paths if not p.startswith("/api/v1/")} == {"/health", "/health/db"}
+    assert {p for p in paths if not p.startswith("/api/v1/")} == {"/health", "/health/db", "/health/ready"}
 
 
 def test_unknown_course_id_formats(api, professor):

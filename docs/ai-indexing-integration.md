@@ -2,12 +2,9 @@
 
 Owner: CE-1. Audience: AI-1 (implementer of the AI side), CE/AI reviewers.
 
-> **Status: proposal.** This is the interface CE-1 implemented and tests against
-> isolated test doubles. It is **not** part of the shared contract:
-> `contracts/ai-service.openapi.yaml` is unchanged and changes only with one CE and one
-> AI approval. Nothing here has been confirmed by AI-1. Open decisions are listed at
-> the end. `INDEXING_ENABLED` is `false` by default and must stay so until AI-1 ships a
-> compatible, non-mock implementation.
+> **PROPOSED.** The shared release candidate describes CE-1’s tested wire profile.
+> Revision 0009 supplies CE’s persistence boundary (§8). Keep `INDEXING_ENABLED=false` pending
+> joint approval, deployment grants and verification with a real AI-1 provider. [Provider handoff](ai-provider-handoff.md)
 
 ## 1. Responsibilities and ownership
 
@@ -33,7 +30,7 @@ index worker:  indexing enabled? ─► GET capabilities (cached) ─► claim (
 AI service:    validate ─► chunk + embed ─► ONE transaction: chunks + generation record
                ─► COMMIT ─► 200 {status: "indexed", echoes}
 index worker:  validate echoes ─► one transaction, fenced by the attempt token:
-               re-verify the stored content digest ─► job succeeded + document indexed
+               verify stored digest + committed generation/chunks ─► job succeeded + document indexed
 ```
 
 ## 2. Transport and authentication
@@ -63,9 +60,8 @@ about to be claimed, never at worker start-up.
 
 CE requires exactly these keys; `mock` must be the boolean `false` (absent, `true` or
 any other value is refused); `completion` must contain `"sync"`; `max_request_bytes`
-is a positive integer. Anything else — including the repository's current mock, which
-has no such endpoint and reports `"mock": true` on `/health` — makes the service *not
-ready*: **no job is claimed and no attempt is consumed**. CE caches each probe result
+is a positive integer. The fixture provider reports `mock: true` on this endpoint.
+CE refuses the probe before claiming a job or consuming an attempt. CE caches each probe result
 (ready or not) for `AI_PROBE_CACHE_SECONDS` (30 s) per worker process, so an unavailable
 service is asked at most once per period per process.
 
@@ -191,7 +187,7 @@ Error body for every non-2xx answer:
 
 | Answer | CE classification | Effect |
 | --- | --- | --- |
-| 200, valid, echoes match | confirmed | complete (digest re-verified), document `indexed` |
+| 200, valid, echoes match | verify PostgreSQL | publish only after matching source, generation and chunks; missing proof retries |
 | 200 invalid / other 2xx / 3xx / 4xx without the error body / 404 / 405 | incompatible | attempt retried later; worker stops claiming until the next probe |
 | 202 | not confirmed | attempt retried later with the same key |
 | 400, 409, 422 with error body, `retryable: false` | rejected (permanent) | job and document fail (`index_rejected`); operator may `retry-index` |
@@ -224,10 +220,9 @@ crashes after sending and lease recovery all cause replays). AI-1 must guarantee
    generation record are committed in one transaction. Never `200` before the commit.
 2. **Replay.** A request whose `idempotency_key` is already committed returns the same
    `200` body with `replayed: true` and writes nothing.
-3. **Concurrent duplicates.** Two requests with the same key at the same time must not
-   both write: serialize on the key (`pg_advisory_xact_lock(hashtext(key))` or a
-   unique constraint on the generation record). The loser either waits and replays or
-   answers `409 in_progress` (`retryable: true`).
+3. **Concurrent duplicates.** The write function serializes calls on the document row.
+   A concurrent caller can wait for the commit and replay. A provider that bounds the
+   wait can return `409 in_progress` (`retryable: true`).
 4. **Lost responses.** A request whose response was lost is replayed by CE with the
    same key and body; rule 2 applies.
 5. **Stale generations.** A document has at most one committed generation. A request
@@ -242,8 +237,7 @@ crashes after sending and lease recovery all cause replays). AI-1 must guarantee
 
 CE's side: completion is one transaction fenced by the attempt token; it locks the
 document, reads its sections `FOR SHARE`, recomputes the canonical content digest from
-what is stored *now* and marks the document `indexed` only if it equals the digest the
-AI service confirmed. A different digest (content changed while indexing) fails the job
+what is stored *now* and checks the committed derived data under §8 before marking the document `indexed`. A different digest (content changed while indexing) fails the job
 and the document (`index_content_changed`); nothing is re-sent automatically. Remote
 deadlines are per attempt and start with the request; they never derive from the job's
 `created_at` (jobs may wait a long time while indexing is disabled).
@@ -253,67 +247,74 @@ deadlines are per attempt and start with the request; they never derive from the
 - `course_id` is part of the digest and the key: identical text in two courses gives
   two independent requests, generations and chunk sets.
 - Every chunk row stores the request's `course_id`.
-- **Retrieval MUST filter by BOTH course identity AND document status**, in the same
-  query, for every read of `chunks` (dense, sparse, hybrid, topic or citation lookups):
+- The retrieval role uses the following function for dense, sparse, hybrid, topic and
+  citation reads. CE supplies the authorized course and origins for the request.
 
   ```sql
-  FROM chunks c JOIN documents d ON d.id = c.document_id
-  WHERE c.course_id = :course_id AND d.course_id = :course_id AND d.status = 'indexed'
+  SELECT * FROM public.retrieve_index_chunks(:course_id, :allowed_origins)
   ```
 
-  The course filter keeps one course's material out of another's answers. The status
-  filter is what makes a generation *visible*: the AI side commits chunks first, and CE
-  marks the document `indexed` only after validating the confirmation and re-verifying
-  the content digest. Until then (and forever after a lost completion, `index_content_changed`,
-  a failed or `stale` document) the chunks exist but must never be retrieved. Neither
-  filter substitutes for the other, and a caller-supplied course id is only trusted after
-  the enrolment check in core-api. §8 makes the database enforce what it can.
+  The function checks the committed generation, course, origin, publication state and
+  source visibility in one query (§8). After a lost response the chunks stay hidden
+  until CE recovers the job and verifies the committed data.
 - CE validates that the confirmation echoes the request's `course_id`; a confirmation
   for another course is refused.
 
-## 8. Persistence in the shared PostgreSQL (proposal)
+## 8. Durable PostgreSQL handoff (revision 0009)
 
-CE-1 keeps schema ownership; AI-1 writes only its own derived data through a dedicated
-role. Proposed for the **next CE migration after AI-1 agrees** (M4 adds no migration):
+CE-1 supplies the migration, the restricted SQL operations and the publication check. AI-1 supplies the actual chunks, embeddings, tags and model provenance. This allocation is **proposed pending joint approval**. The execution plan describes asynchronous jobs, shared external chunks linked by topic, and broader direct AI table grants. This first-release boundary uses a synchronous committed receipt inside the existing CE job, course-local derived rows, and separate write and retrieval operations. The F02 HTTP body and headers stay at `studygraph.index/1`.
 
-- Role `studygraph_ai_indexer`: `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
-  NOBYPASSRLS`, `CONNECTION LIMIT` small, `statement_timeout` and
-  `idle_in_transaction_session_timeout` set on the role, its own password from the
-  secret store. No ownership of any object; no DDL.
-- Grants of the indexer: `SELECT, INSERT, DELETE` on `chunks` and `chunk_topics`;
-  `SELECT, INSERT` on a new `index_generations`; `SELECT (id, course_id)` on `documents`
-  (to check that the document exists and belongs to the request's course). **No** access to
-  `users`, `enrollments`, `ingestion_jobs`, `document_sections` or uploads, no `UPDATE` on
-  `documents` and **no way to set `documents.status`**: only CE marks a document `indexed`.
-- Retrieval needs the same two filters as §7, so it gets its own read-only role
-  `studygraph_ai_retriever` (same role attributes; it may be the same service with a second
-  connection pool), never the indexer's write role: `SELECT` on `chunks` and `chunk_topics`
-  plus `SELECT (id, course_id, status)` on `documents`, nothing else. Preferred: a CE-owned
-  view `retrievable_chunks` (`security_barrier`) that joins `chunks` to `documents` with
-  `c.course_id = d.course_id AND d.status = 'indexed'` already applied, with the retriever
-  granted `SELECT` on the view only and nothing on the base tables. Callers then add
-  `WHERE course_id = :course_id`; with the view, forgetting the status filter is impossible.
-  Without the view, the §7 query is a mandatory contract and is covered by an AI-side test.
-- `index_generations` (CE migration): `document_id` (`UNIQUE`: one committed generation per
-  document), `course_id`, `idempotency_key` (`UNIQUE`, 64 hex), `content_digest`,
-  `section_count`, `chunk_count`, `committed_at`; **composite foreign key
-  `(document_id, course_id) REFERENCES documents (id, course_id) ON DELETE CASCADE`**
-  (needs `UNIQUE (id, course_id)` on `documents`, redundant with the primary key but required
-  as a foreign-key target), so a generation can never name a course other than its
-  document's. The AI side inserts it in the same transaction as the chunks.
-- `chunks` (same migration): `course_id` becomes `NOT NULL` for indexed material, with the
-  same composite foreign key `(document_id, course_id) REFERENCES documents (id, course_id)
-  ON DELETE CASCADE` and a reference to the generation (`document_id, idempotency_key`
-  → `index_generations`). A chunk therefore cannot carry a course different from its
-  document's, and a retrieval filtered by `c.course_id` cannot leak a document that
-  belongs to another course. (Today a document with chunks could not be deleted: the cascade
-  fixes that too.)
-- CE side, proposed hardening of `complete_index`: in its existing transaction, also require
-  that an `index_generations` row exists for `(document_id, confirmed key, confirmed digest)`
-  before setting `documents.status = 'indexed'`. Leaving `indexed` (reparse, `stale`,
-  failure) hides the chunks at once through the status filter; deleting them is the explicit
-  purge operation (open decision 6), never implicit.
-- Embedding dimension stays 384 (`app/models.py`) unless AI-1 asks otherwise.
+### AI-1 write and replay
+
+After validating the F02 request, compute the derived rows outside the database transaction. In a short PostgreSQL transaction at READ COMMITTED, issue the following parameterized call:
+
+```sql
+SELECT chunk_count, replayed
+FROM public.commit_index_generation(
+    :document_id, :course_id, :idempotency_key, :content_digest, :section_count,
+    :embedding_model, :embedding_version, CAST(:chunks AS jsonb)
+);
+```
+
+- `chunks` is a JSON array. Each object carries integer `section_ordinal`, nonblank `text`, object `locator`, and `embedding` as an array of 384 finite numbers with nonzero norm. Optional `topic_ids` is an array of distinct UUIDs belonging to this course. PostgreSQL assigns chunk IDs and derives document, course and origin from the locked document. Tagging may be omitted.
+- Every source section needs at least one chunk. Each chunk's text is a contiguous excerpt of that section. Overlap and multiple chunks per section are allowed. Split at section boundaries. For physical pages copy the section locator exactly. For section-based versions use `{"section": label}`. Start with the heading, or `Introduction` for a lead. Replace each POSIX control character with a space, trim ASCII spaces at both ends and take the first 40 characters. The source ordinal retains the exact location when headings coincide. These are proposed **database inputs** for AI-1; the F02 receipt carries neither ordinals nor model identifiers.
+- Model name and version use 1–100 ASCII characters and the alphabet in the migration. CE verifies presence and vector storage; model choice, consistent query-vector space and embedding quality need AI-1 evaluation. `committed_at` is a database-clock timestamp assigned within the write transaction. Visibility to a different transaction establishes commit.
+- The first writer locks the document, checks the course and derived key, requires a pending document with live CE index work, and locks its source sections. One statement writes the generation, all chunks and topic links. Database constraints and the evidence check run before the statement succeeds. **Commit the transaction before sending HTTP 200.** A failure during any insert rolls back the entire call.
+- For a cheap replay lookup pass SQL NULL for chunks, model and version, with the same five identity arguments. No row means there is no generation. End that short transaction before computing embeddings. A matching row returns original counts with `replayed=true`; reconstruct the F02 receipt from the validated request and the returned count. Simultaneous first writers serialize on the document. A caller that lost the commit acknowledgement reconnects and uses this same lookup. A committed generation with another key yields `generation_conflict`; a mismatched course yields `course_mismatch`. Neither path replaces data.
+- Map identity conflicts to the documented permanent 409, malformed derived inputs to a bounded permanent error, and a temporary lock, serialization failure or unavailable live claim to a retryable error. Return the F02 error envelope with safe messages. Keep raw driver diagnostics, vectors, passages and credentials out of HTTP and logs.
+
+### CE publication and retrieval
+
+The provider transaction and CE publication are separate commits. Between them a generation exists and remains invisible to the retriever. CE locks the relevant course settings, source, external resource, current job and document in its established order. It verifies current routing, pending status, active provenance, the attempt token and the canonical digest of the locked source. It calls `verified_index_generation` using the rebuilt identity and the HTTP chunk count. The query counts **all** chunks of the document, including unexpected rows. It checks agreement with the generation's course, key, digest, both counts, source ordinals, exact locators, text excerpts, origin and nonzero vectors. Composite keys constrain new topic associations. The restricted writer cannot add, update or delete derived rows after its first commit.
+
+Missing or inconsistent proof returns `index_proof_missing` through the existing bounded retry/backoff path. A stale token or expired lease cannot publish. The successful job update checks the database clock and retains its row lock through commit. The external version switch, document status and job success commit together. A crash before that commit leaves work for CE lease recovery; a later provider replay supplies the original receipt and CE verifies the database again.
+
+AI-1 reads through `public.retrieve_index_chunks(course_uuid, allowed_origins_text_array)` using its separate retrieval identity. It returns published, generation-bound chunks, their vectors, model identity and course-local topic IDs. Supply the course and origin list authorized by CE for this request. The database enforces the supplied scope. End-user authorization still belongs to CE. The function excludes disabled sources and stale external versions. The prior indexed version remains visible while a replacement is pending. Course harvest opt-out stops new publication and keeps previously published material citable under the existing M6 policy.
+
+### Privilege and deployment handoff
+
+| Identity | Privileges for this boundary |
+| --- | --- |
+| Migration owner | Trusted schema and routine owner. Runs Alembic and grants. Keep owner membership and schema creation away from service logins. |
+| CE runtime | Existing CE lifecycle, source reads and row-lock permissions, plus SELECT on generations and EXECUTE on the invoker-rights verifier. CE-1 owns publication. |
+| `studygraph_ai_indexer` | EXECUTE on the insert-once function. It can replay its known request identity. |
+| `studygraph_ai_retriever` | EXECUTE on the course- and origin-scoped retrieval function. |
+
+CE-3 provisions distinct non-owner login identities and the three fresh unprivileged groups named in the grant script. Use separate credentials/pools, private transport, timeouts and secret rotation. Service identities must lack superuser, role creation, database creation, replication, bypass-RLS, schema CREATE, and inherited table or owner grants. Audit effective PUBLIC grants and role memberships on the target, including older PostgreSQL deployments. The two definer-rights entry points use qualified objects and a fixed search path. The migration revokes PUBLIC execution within the DDL transaction.
+
+Apply the F03 grant script as the owner in one transaction on the approved target after the migration. For psql, use `-X --single-transaction -v ON_ERROR_STOP=1 -f services/core-api/scripts/index_privileges.sql`. This is an incremental grant set for an existing CE runtime. The compose development superuser remains a separate F05 concern. [Grant script](../services/core-api/scripts/index_privileges.sql)
+
+### Existing data and rollout
+
+Keep indexing disabled. Inventory indexed document IDs/status, existing chunks, null/mismatched courses, missing vectors, topic associations and active jobs on the target. Take a restorable backup and rehearse the upgrade with representative data. Drain older workers before the maintenance window. The migration needs exclusive locks while it extends the derived tables and withdraws old publication.
+
+Revision 0009 retains legacy chunks, topic links, source and job history. Legacy chunks have a null generation key. Previously indexed documents move to `failed` for review. Their original bytes remain, and no generation is synthesized. A document with legacy chunks cannot acquire a new generation under the same ID. For those documents, preserve archived evidence and use a reviewed replacement/import or retention procedure. Keep the quarantine when a safe replacement is unavailable. The normal retry-index rules still refuse a document with a historical successful index job. A failed document with stored sections, no legacy chunks and eligible job history can follow the normal retry process. No reindex runs during upgrade.
+
+Downgrade refuses while any generation exists. A schema-only downgrade retains the quarantine and the legacy data. It does not republish documents. Restore the reviewed backup if the original publication state is required. CE-3 validates grants with real deployment identities; AI-1 demonstrates a real commit, restart/replay, isolated retrieval and model compatibility in staging before any activation decision.
+
+### Hybrid search
+
+The migrations and development catalog have a pgvector column of dimension 384. Neither defines a generated `tsvector` column or a GIN text-search index. PostgreSQL can compute `to_tsvector` over the permitted chunk text at query time. A materialized or indexed sparse search path will need additional DDL once AI-1 and CE agree on language configuration, ranking and measured workload. Revision 0009 adds a document/generation B-tree for integrity and verification; ranking and search indexes are outside F03.
 
 ## 9. CE implementation summary (M4)
 
@@ -336,9 +337,9 @@ role. Proposed for the **next CE migration after AI-1 agrees** (M4 adds no migra
   --database NAME DOCUMENT_ID` (failed document with a succeeded parse and stored
   sections; no extraction; same key for unchanged content), and
   `preflight --role index`.
-- Public API unchanged: `indexed` → `ready` only after a confirmed, digest-verified
-  completion; parsed-but-not-indexed stays `processing`; index failures show `failed`
-  with a public message.
+- The public API reports `ready` after CE verifies the receipt, current source digest
+  and committed chunks. Parsed documents awaiting publication show `processing`.
+  Index failures show `failed` with a public message.
 
 ### Time bounds, precisely
 
@@ -378,7 +379,7 @@ refused by the readiness gate and must not be pointed at.
 
 ## 10. Open decisions (need AI-1 / CE agreement)
 
-1. Approval of this wire format and its addition to `contracts/ai-service.openapi.yaml`.
+1. Joint approval of the release candidate in `contracts/ai-service.openapi.yaml`.
 2. Authentication: static bearer token (proposed) vs mTLS or signed short-lived tokens;
    rotation procedure.
 3. Persistence: the role, grants and `index_generations` table of §8 (CE migration),
@@ -398,7 +399,7 @@ Every indexing test in this repository runs against **test doubles**:
 test process implementing this proposal: idempotent replay, one committed generation per
 document with `generation_conflict` and `course_mismatch` refusals (also under concurrent
 requests with different keys), lost responses, blocking, scripted errors) and raw sockets for
-misbehaving peers. The doubles store nothing in PostgreSQL and compute no embeddings.
+misbehaving peers. Worker integration tests use the restricted SQL writer on disposable PostgreSQL with deterministic test vectors. HTTP-only protocol tests also use an in-memory double.
 The tests show that CE-1's worker, client, state machine and recovery behave as
 specified; **no real AI indexing has been performed or verified.** The repository's
 mock `services/ai-service` is refused by the readiness gate and must never mark a

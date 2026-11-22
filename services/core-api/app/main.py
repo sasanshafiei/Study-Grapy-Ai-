@@ -1,19 +1,25 @@
-from fastapi import Depends, FastAPI
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .celery_app import make_celery
 from .chat.client import AiChatClient
 from .config import Settings
 from .config import settings as default_settings
-from .db import SessionLocal, get_db
+from .database_compatibility import IncompatibleDatabase, check_database_compatibility
+from .db import SessionLocal, create_engine_and_session_factory, get_db
 from .errors import ApiError, api_error_handler, unhandled_error_handler
 from .indexing.client import InvalidServiceUrl
 from .ingestion.dispatch import CeleryPublisher, Publisher
 from .limits import ConcurrencyLimiter, RateLimiter
 from .quiz.client import AiQuizClient
 from .routers import chat, courses, dashboard, documents, exam_questions, exams, quizzes
+from .schemas.documents import ErrorBody
+from .schemas.openapi import STRING, enum, exact
 from .storage import LocalFileStorage
 
 _DEFAULT = object()
@@ -34,7 +40,9 @@ def create_app(
     storage and publisher (as the tests do) has no path to the default engine,
     the real upload directory or the real broker. Pass publisher=None to
     publish nothing after uploads (the dispatch sweep still does). Building
-    the app connects to nothing and creates nothing.
+    the app opens no connections. An injected session factory is caller-owned.
+    Explicit settings without a factory give this app its own engine. The
+    no-argument app uses the process-wide SessionLocal.
 
     M5: the chat client (AI_SERVICE_URL; None when that URL is invalid, which
     makes chat answer 503) and the in-process limiters live on app.state too,
@@ -47,10 +55,31 @@ def create_app(
     M9: the exam routers (all answer 503 after authorization while EXAMS_ENABLED is
     off) and the export render/rate limiters.
     """
+    owned_engine = None
+    if session_factory is None:
+        if settings is None:
+            session_factory = SessionLocal
+        else:
+            owned_engine, session_factory = create_engine_and_session_factory(settings)
     settings = settings or default_settings
-    app = FastAPI(title="StudyGraph Core API", version="0.1.0")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            if owned_engine is not None:
+                owned_engine.dispose()
+
+    app = FastAPI(
+        title="StudyGraph Core API", version="0.1.0", lifespan=lifespan,
+        description="CE-1 public HTTP API. Protected routes require a bearer token. The CE-3 authentication seam "
+                    "currently fails closed (401). Exam routes require the active owning professor and EXAMS_ENABLED; "
+                    "file downloads additionally require EXAM_EXPORT_ENABLED. Both print variants are professor-only. "
+                    "All exam responses carry Cache-Control: no-store.",
+    )
     app.state.settings = settings
-    app.state.session_factory = session_factory or SessionLocal
+    app.state.session_factory = session_factory
     app.state.storage = storage or LocalFileStorage(settings.upload_dir)
     if publisher is _DEFAULT:
         publisher = CeleryPublisher(make_celery(settings), settings) if settings.dispatch_on_upload else None
@@ -96,18 +125,36 @@ def create_app(
     app.include_router(exam_questions.router)
     app.include_router(exams.router)
 
-    @app.get("/health")
+    @app.get("/health", responses={200: {"content": {"application/json": {"schema":
+        exact(status=enum("ok"), service=enum("core-api"), env=STRING)}}}})
     def health():
+        """Process liveness. This check makes no dependency calls."""
         return {"status": "ok", "service": "core-api", "env": settings.environment}
 
-    @app.get("/health/db")
+    @app.get("/health/db", responses={200: {"content": {"application/json": {"schema":
+        exact(status=enum("ok"), pgvector_installed={"type": "boolean"})}}}, 500: {"model": ErrorBody}})
     def health_db(db: Session = Depends(get_db)):
-        """Proves the database is reachable and pgvector is installed."""
+        """Database diagnostic. Reports connectivity and whether pgvector is installed at any schema revision."""
         db.execute(text("SELECT 1"))
         row = db.execute(
             text("SELECT extname FROM pg_extension WHERE extname = 'vector'")
         ).first()
         return {"status": "ok", "pgvector_installed": row is not None}
+
+    @app.get("/health/ready", responses={
+        200: {"description": "The core API database is ready.", "content": {"application/json": {
+            "schema": exact(status=enum("ready"))}}},
+        503: {"description": "The database is unreachable or incompatible.", "model": ErrorBody},
+    })
+    def readiness(response: Response, db: Session = Depends(get_db)):
+        """Core API readiness. Requires the application's PostgreSQL schema revision and pgvector in public."""
+        try:
+            db.execute(text("SET LOCAL statement_timeout = '2s'"))
+            check_database_compatibility(db.connection())
+        except (IncompatibleDatabase, SQLAlchemyError):
+            raise ApiError(503, "not_ready", "The database is not ready.", headers={"Cache-Control": "no-store"}) from None
+        response.headers["Cache-Control"] = "no-store"
+        return {"status": "ready"}
 
     return app
 

@@ -8,11 +8,17 @@ from __future__ import annotations
 import copy
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from sqlalchemy import text
 
+from app.ingestion import jobs, pipeline
+from app.ingestion.normalize import Section
 from tests import exam_support as ex
 from tests.exam_support import ExamClient, key, match, mcq_body, short_body, tf_body
+from tests.pdf_samples import Blank, build_pdf, text_page
+from tests.worker_support import wait_for
 
 
 @pytest.fixture
@@ -235,6 +241,103 @@ def test_src01_approval_freezes_source_titles(bank):
     _invalid(refused, "source_ref_unavailable")
     assert c.get(x.q_path(gone["id"])).json()["version"] == 1
     world.execute("UPDATE documents SET course_id = :c WHERE id = :d", c=bank["course"], d=bank["document"])
+
+
+@pytest.fixture
+def three_page_upload(bank):
+    api = bank["api"]
+    data = build_pdf([text_page("First"), text_page("Second"), Blank()])
+    response = api.upload(bank["course"], data, filename="Lecture.pdf", content_type="application/octet-stream")
+    assert response.status_code == 202, response.text
+    uploaded = response.json()
+    assert uploaded["pages"] is None
+    return uploaded["id"], uuid.UUID(uploaded["job_id"])
+
+
+def test_f08_parse_then_approve_rechecks_pages_and_allows_a_corrected_draft(bank, three_page_upload):
+    x, api = bank["x"], bank["api"]
+    doc, job = three_page_upload
+    first = {"document_id": doc, "locator": {"page": 1}}
+    last = {"document_id": doc, "locator": {"page": 3}}
+    invalid = {"document_id": doc, "locator": {"page": 12}}
+    q = x.question(mcq_body(source_refs=[first, invalid]))
+    exam = x.add(x.exam(), q)
+
+    ctx = pipeline.WorkerContext(api.session_factory, api.storage, api.settings)
+    assert pipeline.run_parse_job(job, ctx).outcome == "succeeded"
+    parsed = next(item for item in api.list(bank["course"]).json() if item["id"] == doc)
+    assert (parsed["pages"], parsed["status"]) == (3, "processing")
+
+    refused = x.c.post(x.q_path(q["id"], "/approve"), headers=match(q["version"]))
+    _invalid(refused, "locator")
+    assert refused.json()["field"] == "source_refs"
+    current = x.c.get(x.q_path(q["id"])).json()
+    assert (current["status"], current["version"], current["approved_revision"]) == ("draft", q["version"], None)
+    assert x.c.get(x.q_path(q["id"], "/revisions")).json()["items"] == []
+    assert [e["action"] for e in x.c.get(x.q_path(q["id"], "/history")).json()["items"]] == ["question_created"]
+    assert x.finalize(exam).json()["code"] == "exam_not_ready"
+
+    updated = x.edit(q, mcq_body(source_refs=[first, last]))
+    approved = x.approve(updated)
+    assert approved["approved_revision"] == 1
+    final = x.finalized(exam)
+    assert final["items"][0]["pinned_revision"] == 1
+    answer_key = x.preview(final, "answer_key")["answer_key"]
+    assert answer_key[0]["sources"] == ["Lecture.pdf, p. 1", "Lecture.pdf, p. 3"]
+    x.approve(x.edit(approved, mcq_body(source_refs=[first])))
+    assert x.preview(final, "answer_key")["answer_key"] == answer_key
+    assert x.preview(final, "student")["answer_key"] is None
+
+
+def test_f08_unresolved_pdf_defers_approval_until_parse_succeeds(bank, three_page_upload):
+    x, api = bank["x"], bank["api"]
+    doc, job = three_page_upload
+    q = x.question(mcq_body(source_refs=[{"document_id": doc, "locator": {"page": 1}}]))
+    refused = x.c.post(x.q_path(q["id"], "/approve"), headers=match(q["version"]))
+    _invalid(refused, "source_ref_unavailable")
+    assert refused.json()["field"] == "source_refs"
+    ctx = pipeline.WorkerContext(api.session_factory, api.storage, api.settings)
+    assert pipeline.run_parse_job(job, ctx).outcome == "succeeded"
+    assert x.approve(q)["approved_revision"] == 1  # same draft and If-Match
+
+
+@pytest.mark.parametrize("mime_type", ["text/plain", None], ids=["non_pdf", "legacy_untyped"])
+def test_f08_page_count_policy_preserves_other_class_sources(bank, mime_type):
+    world, x = bank["world"], bank["x"]
+    doc = world.document(bank["course"], title="Notes.pdf", mime_type=mime_type)
+    ref = {"document_id": str(doc), "locator": {"page": 2}}
+    assert x.question(mcq_body(source_refs=[ref]), approve=True)["approved_revision"] == 1
+    _invalid(x.c.post(x.q_path(), json=mcq_body(source_refs=[{**ref, "locator": {"heading": "Intro"}}]),
+                      headers=key()), "locator")
+    second = x.question(mcq_body(source_refs=[ref]))
+    world.execute("UPDATE documents SET page_count = 1 WHERE id = :d", d=doc)
+    _invalid(x.c.post(x.q_path(second["id"], "/approve"), headers=match(second["version"])), "locator")
+
+
+@pytest.mark.parametrize("page", [3, 4])
+def test_f08_approval_waits_for_concurrent_parse_commit(bank, three_page_upload, page):
+    api, world, x = bank["api"], bank["world"], bank["x"]
+    doc, job = three_page_upload
+    q = x.question(mcq_body(source_refs=[{"document_id": doc, "locator": {"page": page}}]))
+    with api.session_factory.begin() as session:
+        claim = jobs.claim_parse(session, job, api.settings.job_lease_seconds)
+        assert claim is not None
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with api.session_factory.begin() as writer:
+            pid = writer.scalar(text("SELECT pg_backend_pid()"))
+            result = jobs._write_completion(writer, claim, 3, [Section(0, 1, "First"), Section(1, 2, "Second")])
+            assert result is jobs.CompletionStatus.COMPLETED
+            approval = pool.submit(x.c.post, x.q_path(q["id"], "/approve"), headers=match(q["version"]))
+            wait_for(lambda: world.scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                                         "WHERE :pid = ANY(pg_blocking_pids(pid)))", pid=pid),
+                     timeout=5, interval=0.02, what="approval waiting on the parse transaction")
+        response = approval.result(timeout=5)
+    if page == 3:
+        assert response.status_code == 200 and response.json()["approved_revision"] == 1
+    else:
+        _invalid(response, "locator")
+        assert x.c.get(x.q_path(q["id"], "/revisions")).json()["items"] == []
 
 
 def test_cur01_val06_pagination_filters_and_cursor_binding(bank, make_api):

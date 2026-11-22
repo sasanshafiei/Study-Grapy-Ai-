@@ -1,0 +1,156 @@
+{
+  "capabilities": {
+    "protocol": "studygraph.index/1",
+    "service": "ai-service",
+    "mock": false,
+    "completion": [
+      "sync"
+    ],
+    "max_request_bytes": 16777216,
+    "locators": [
+      "page",
+      "section"
+    ]
+  },
+  "request": {
+    "protocol": "studygraph.index/1",
+    "document": {
+      "id": "00000000-0000-0000-0000-000000000002",
+      "course_id": "00000000-0000-0000-0000-000000000001",
+      "origin": "class",
+      "kind": "pdf",
+      "title": "Cinétique",
+      "url": null,
+      "licence": null,
+      "language": "en",
+      "source_sha256": null,
+      "page_count": 2
+    },
+    "sections": [
+      {
+        "ordinal": 0,
+        "locator": {
+          "page": 1
+        },
+        "text": "A catalyst lowers the activation energy of a reaction."
+      },
+      {
+        "ordinal": 1,
+        "locator": {
+          "page": 2
+        },
+        "text": "A catalyst is regenerated."
+      }
+    ],
+    "content_digest": "5f4909e00236d5d8c3648d73eea3ec90014d1d06e52f26d95505fb3230646f1e",
+    "idempotency_key": "5e474be6899b0b720bca5fe386da7529861ceab744f1ec0882091e1a3cbd8b45"
+  },
+  "response": {
+    "protocol": "studygraph.index/1",
+    "status": "indexed",
+    "document_id": "00000000-0000-0000-0000-000000000002",
+    "course_id": "00000000-0000-0000-0000-000000000001",
+    "content_digest": "5f4909e00236d5d8c3648d73eea3ec90014d1d06e52f26d95505fb3230646f1e",
+    "idempotency_key": "5e474be6899b0b720bca5fe386da7529861ceab744f1ec0882091e1a3cbd8b45",
+    "section_count": 2,
+    "chunk_count": 2,
+    "replayed": false
+  },
+  "section_example": {
+    "request": {
+      "protocol": "studygraph.index/1",
+      "document": {
+        "id": "00000000-0000-0000-0000-000000000009",
+        "course_id": "00000000-0000-0000-0000-000000000001",
+        "origin": "external",
+        "kind": "article",
+        "title": "Cinétique",
+        "url": "https://example.org/Catalysis",
+        "licence": "CC BY 4.0",
+        "language": "en",
+        "source_sha256": null,
+        "page_count": null,
+        "locator_scheme": "section",
+        "attribution": {
+          "provider": "fixture",
+          "page_id": 12,
+          "revision_id": 17,
+          "revision_url": "https://example.org/Catalysis?rev=17",
+          "canonical_url": "https://example.org/Catalysis",
+          "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+          "attribution": "Fixture chemistry text."
+        }
+      },
+      "sections": [
+        {
+          "ordinal": 0,
+          "locator": {
+            "level": 0,
+            "heading": null,
+            "anchor": null
+          },
+          "text": "Introduction."
+        },
+        {
+          "ordinal": 1,
+          "locator": {
+            "level": 2,
+            "heading": "Catalysis",
+            "anchor": "Catalysis"
+          },
+          "text": "A catalyst lowers the activation energy of a reaction."
+        }
+      ],
+      "content_digest": "d688b0c19112a6d293961f20f60f706d1a0b64d170257b4440146752b9ed16f5",
+      "idempotency_key": "bc1d5753ff9cf5e32aceb21c65ca4c7c786564d0977bca1ac0058aa302a51141"
+    },
+    "response": {
+      "protocol": "studygraph.index/1",
+      "status": "indexed",
+      "document_id": "00000000-0000-0000-0000-000000000009",
+      "course_id": "00000000-0000-0000-0000-000000000001",
+      "content_digest": "d688b0c19112a6d293961f20f60f706d1a0b64d170257b4440146752b9ed16f5",
+      "idempotency_key": "bc1d5753ff9cf5e32aceb21c65ca4c7c786564d0977bca1ac0058aa302a51141",
+      "section_count": 2,
+      "chunk_count": 2,
+      "replayed": false
+    }
+  },
+  "invalid_responses": [
+    {
+      "path": [
+        "document_id"
+      ],
+      "value": "00000000-0000-0000-0000-000000000009",
+      "schema_valid": true
+    },
+    {
+      "path": [
+        "course_id"
+      ],
+      "value": "00000000-0000-0000-0000-000000000009",
+      "schema_valid": true
+    },
+    {
+      "path": [
+        "chunk_count"
+      ],
+      "value": 0,
+      "schema_valid": false
+    },
+    {
+      "path": [
+        "section_count"
+      ],
+      "value": 1,
+      "schema_valid": true
+    },
+    {
+      "path": [
+        "replayed"
+      ],
+      "value": "true",
+      "schema_valid": false
+    }
+  ]
+}

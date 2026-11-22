@@ -32,6 +32,10 @@ error and creates nothing: tables created that way are invisible to Alembic.
 If you run Compose with extra `-f` files (for example a local, untracked override),
 pass the same files to every command below.
 
+## Revision 0009 rollout
+
+Revision 0009 quarantines previously indexed documents and preserves their derived rows and job history. Plan the maintenance window, backup and legacy inventory before upgrading a populated database. Workers require revision 0009. Production indexing stays disabled pending role provisioning, real-provider verification and joint approval. [Index persistence and rollout](ai-indexing-integration.md#8-durable-postgresql-handoff-revision-0009)
+
 ## Everyday commands
 
 ```bash
