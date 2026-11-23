@@ -1,0 +1,27 @@
+{
+  "model": {
+    "name": "studygraph-bkt",
+    "version": "1.0.0-assist09"
+  },
+  "source": "ASSISTments skill builder: skill_builder_data_corrected_collapsed.csv",
+  "p_init": 0.750593,
+  "p_transit": 0.092727,
+  "emissions": {
+    "easy": {
+      "guess": 0.3,
+      "slip": 0.051082
+    },
+    "medium": {
+      "guess": 0.260529,
+      "slip": 0.193874
+    },
+    "hard": {
+      "guess": 0.09115,
+      "slip": 0.3
+    }
+  },
+  "guess_floor": {
+    "mcq": 0.25,
+    "true_false": 0.5
+  }
+}
