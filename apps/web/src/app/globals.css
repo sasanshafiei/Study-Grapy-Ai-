@@ -1,0 +1,284 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/*
+  StudyGraph design tokens.
+
+  The interface is drawn in one ink colour. The only hues on screen carry
+  meaning:
+    - highlighter colours say where a piece of an answer came from
+      (class material, external source, live web result)
+    - status colours say whether something is good, needs attention, or failed
+    - one blue marks data in charts
+  Change a value here and it changes everywhere, in both themes.
+*/
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  --page: #f3f5f8;
+  --surface: #ffffff;
+  --sunken: #ebeef3;
+  --ink: #141b2e;
+  --ink-2: #434c63;
+  --ink-3: #667085;
+  --rule: #dce1e9;
+  --rule-strong: #bcc4d2;
+
+  --cover: #141b2e;
+  --cover-ink: #e9ecf3;
+  --cover-muted: #9aa3b8;
+  --cover-active: #28324f;
+
+  --action: #141b2e;
+  --action-ink: #ffffff;
+
+  /* Where an answer came from: highlighter tint (behind text) and solid (marks). */
+  --hl-class: #ffe97a;
+  --hl-external: #cde2fb;
+  --hl-web: #fbd5e3;
+  --mark-class: #eda100;
+  --mark-external: #2a78d6;
+  --mark-web: #e87ba4;
+
+  /* Charts */
+  --series: #2a78d6;
+  --series-track: #dbe8f9;
+  --grid: #e4e8ee;
+  --axis: #bcc4d2;
+
+  /* Status: always shown with an icon and a word, never colour alone. */
+  --good: #0ca30c;
+  --good-ink: #006300;
+  --good-wash: #e5f4e4;
+  --warn: #fab219;
+  --warn-ink: #7a4f00;
+  --warn-wash: #fdf1d4;
+  --crit: #d03b3b;
+  --crit-ink: #a82222;
+  --crit-wash: #fbe9e9;
+
+  --focus: #2a78d6;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --page: #0c101c;
+  --surface: #161c30;
+  --sunken: #1f2740;
+  --ink: #e9ecf3;
+  --ink-2: #b7bfd1;
+  --ink-3: #8d96ad;
+  --rule: #2a3350;
+  --rule-strong: #3d4869;
+
+  --cover: #090c16;
+  --cover-ink: #e9ecf3;
+  --cover-muted: #8d96ad;
+  --cover-active: #1f2740;
+
+  --action: #e9ecf3;
+  --action-ink: #141b2e;
+
+  --hl-class: #5c4a10;
+  --hl-external: #1d3d6c;
+  --hl-web: #5f2942;
+  --mark-class: #c98500;
+  --mark-external: #3987e5;
+  --mark-web: #d55181;
+
+  --series: #3987e5;
+  --series-track: #1c3257;
+  --grid: #232c47;
+  --axis: #3d4869;
+
+  --good: #0ca30c;
+  --good-ink: #5fd25f;
+  --good-wash: #12301a;
+  --warn: #fab219;
+  --warn-ink: #fbc54f;
+  --warn-wash: #3a2e0c;
+  --crit: #d03b3b;
+  --crit-ink: #f08a8a;
+  --crit-wash: #3b1719;
+
+  --focus: #6da7ec;
+}
+
+@theme inline {
+  --font-sans: "Atkinson Hyperlegible Next Variable", ui-sans-serif, system-ui,
+    "Segoe UI", sans-serif;
+  --font-serif: "Literata Variable", Georgia, "Times New Roman", serif;
+
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+
+  --color-cover: var(--cover);
+  --color-cover-ink: var(--cover-ink);
+  --color-cover-muted: var(--cover-muted);
+  --color-cover-active: var(--cover-active);
+
+  --color-action: var(--action);
+  --color-action-ink: var(--action-ink);
+
+  --color-hl-class: var(--hl-class);
+  --color-hl-external: var(--hl-external);
+  --color-hl-web: var(--hl-web);
+  --color-mark-class: var(--mark-class);
+  --color-mark-external: var(--mark-external);
+  --color-mark-web: var(--mark-web);
+
+  --color-series: var(--series);
+  --color-series-track: var(--series-track);
+  --color-grid: var(--grid);
+  --color-axis: var(--axis);
+
+  --color-good: var(--good);
+  --color-good-ink: var(--good-ink);
+  --color-good-wash: var(--good-wash);
+  --color-warn: var(--warn);
+  --color-warn-ink: var(--warn-ink);
+  --color-warn-wash: var(--warn-wash);
+  --color-crit: var(--crit);
+  --color-crit-ink: var(--crit-ink);
+  --color-crit-wash: var(--crit-wash);
+
+  --color-focus: var(--focus);
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font-size: 15px;
+    line-height: 1.5;
+    font-optical-sizing: auto;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background: var(--hl-class);
+    color: var(--ink);
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  button,
+  [role="button"],
+  summary,
+  select,
+  label[for] {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+
+  dialog::backdrop {
+    background: rgb(12 16 28 / 0.55);
+  }
+}
+
+@layer components {
+  /* Study content (answers, question text, source excerpts) is set in the
+     reading face; everything the app itself says stays in the sans. */
+  .reading {
+    font-family: var(--font-serif);
+    font-size: 1.0625rem;
+    line-height: 1.68;
+    font-optical-sizing: auto;
+  }
+
+  /* Graph-paper ground, used once on the sign-in page. */
+  .graph-paper {
+    background-color: var(--cover);
+    background-image:
+      linear-gradient(rgb(233 236 243 / 0.07) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(233 236 243 / 0.07) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+
+  .hl {
+    color: inherit;
+    padding: 0.08em 0.12em;
+    border-radius: 2px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+  .hl-class {
+    background: var(--hl-class);
+  }
+  .hl-external {
+    background: var(--hl-external);
+  }
+  .hl-web {
+    background: var(--hl-web);
+  }
+
+  .table-grid th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.8125rem;
+    color: var(--ink-2);
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--rule-strong);
+    white-space: nowrap;
+  }
+  .table-grid td {
+    padding: 0.625rem 0.75rem;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  .table-grid tr:last-child td {
+    border-bottom: 0;
+  }
+  .table-grid .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  body {
+    background: #fff;
+    color: #000;
+  }
+  .no-print {
+    display: none !important;
+  }
+}
