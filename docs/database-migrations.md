@@ -36,6 +36,26 @@ pass the same files to every command below.
 
 Revision 0009 quarantines previously indexed documents and preserves their derived rows and job history. Plan the maintenance window, backup and legacy inventory before upgrading a populated database. Workers require revision 0009. Production indexing stays disabled pending role provisioning, real-provider verification and joint approval. [Index persistence and rollout](ai-indexing-integration.md#8-durable-postgresql-handoff-revision-0009)
 
+## Revision 0010 rollout
+
+Revision 0010 (WP-5 / F10) adds one nullable column, `external_resources.duplicate_content_sha256`,
+with a CHECK that allows it only on `accepted` resources, as a lowercase SHA-256 hex digest,
+never equal to the row's own `content_sha256`. It is metadata-only: no backfill, no table rewrite,
+no document or index change. It records the text digest of an accepted resource's newest checked
+revision when that text duplicates content another accepted resource holds. The resource keeps
+its visible version and its `content_sha256`, the revision is not fetched again while the text is
+held, and it is reconsidered as soon as nobody holds it (`app/harvest/persist.py`).
+
+- **Deploy order.** Run `alembic upgrade head` before starting the new core-api and workers.
+  `REQUIRED_SCHEMA_REVISION` is `0010`: until the database is there, `GET /readyz` answers
+  503 `not_ready` and the worker preflight refuses to start. Code at 0009 does not know the
+  column, so roll the schema and the code forward together.
+- **Downgrade** to 0009 drops the column. Resources that had a recorded duplicate revision
+  get `last_revision_id = NULL`, `duplicate_of_id = NULL` and are due now, so 0009 code fetches
+  and decides them again. No document, version or index row is touched.
+- Test 0010 only on disposable infrastructure (`scripts/test_migrations.sh`); `tests/test_migration_0010.py`
+  covers the CHECK and the downgrade.
+
 ## Everyday commands
 
 ```bash

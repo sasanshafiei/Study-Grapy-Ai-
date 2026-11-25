@@ -464,7 +464,7 @@ def test_the_mastery_queue_needs_a_dedicated_worker_and_its_own_checks():
     enabled = settings(mastery_delivery_enabled=True)
     with pytest.raises(runtime.PreflightError, match="AI_SERVICE_TOKEN"):
         runtime.mastery_worker_preflight(enabled, {**base, "AI_SERVICE_URL": "http://ai-service:8000"})
-    assert runtime.REQUIRED_SCHEMA_REVISION == "0009"
+    assert runtime.REQUIRED_SCHEMA_REVISION == "0010"
 
 
 def test_m8_task_failures_are_logged_without_parameters(caplog):

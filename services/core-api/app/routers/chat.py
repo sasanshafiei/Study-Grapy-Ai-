@@ -60,7 +60,10 @@ _DOC = {
             "description": (
                 "UTF-8 server-sent events. Ignore comment lines. Each data field is JSON. "
                 "A token carries {text}. The terminal done carries id, role, text, citations, grounded, "
-                "used_web, scope, topic_ids and created_at. A terminal error carries {message, code}. "
+                "used_web, scope, topic_ids and created_at. Each citation carries marker, chunk_id, origin, title, "
+                "locator, url, snippet and provenance: null, or for harvested external material the cited "
+                "version's stored {source_url, revision_id, revision_url, attribution, licence, licence_url}. "
+                "A terminal error carries {message, code}. "
                 "After the stream opens an error is an event within the HTTP 200 response."
             ),
             "headers": {"Cache-Control": header("Stream cache policy.", enum("no-store")),

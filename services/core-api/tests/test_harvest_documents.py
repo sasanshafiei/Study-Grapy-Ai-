@@ -187,6 +187,142 @@ def test_a_duplicate_is_decided_again_after_the_page_it_duplicates_is_confirmed_
     assert env.persist(8, 80) is Outcome.NEW_VERSION
 
 
+# --- WP-5 / F10: an accepted page whose newest revision duplicates another accepted page ------------------------
+
+OTHER = " A closing sentence that only the other article had."
+
+
+def _digest(extra: str = "") -> str:
+    return fetched(1, 1, TITLE, PARAGRAPH, extra).content_sha256
+
+
+def _confirm_missing(env, page: int) -> None:
+    resource = env.resource(page)["id"]
+    gone = PageInfo(page_id=page, present=False)
+    assert persist.record_gone(env.factory, env.settings, env.run, resource, gone) is MissingStatus.OBSERVED
+    env.world.execute("UPDATE external_resources SET missing_since = now() - interval '2 days' WHERE id = :r", r=resource)
+    assert persist.record_gone(env.factory, env.settings, env.run, resource, gone) is MissingStatus.CONFIRMED
+
+
+def _accepted_pair(env):
+    """Page 7 (text X) and page 8 (text Y), both accepted and indexed, checks overdue; returns their versions."""
+    assert env.persist(7, 42) is Outcome.ACCEPTED
+    assert env.persist(8, 80, extra=OTHER) is Outcome.ACCEPTED
+    (x,), (y,) = env.versions(7), env.versions(8)
+    assert index_now(env.factory, env.world, x["id"]) is CompletionStatus.COMPLETED
+    assert index_now(env.factory, env.world, y["id"]) is CompletionStatus.COMPLETED
+    env.world.execute(
+        "UPDATE external_resources SET last_checked_at = now() - interval '1 day', "
+        "next_check_at = now() - interval '1 hour' WHERE course_id = :c",
+        c=env.course,
+    )
+    return x, y
+
+
+def test_a_duplicated_new_revision_is_recorded_and_the_visible_version_kept(env):
+    x, _ = _accepted_pair(env)
+    assert env.persist(7, 43, extra=OTHER) is Outcome.DUPLICATE  # page 7's new text equals page 8's
+    resource = env.resource(7)
+    assert resource["last_revision_id"] == 43  # the known revision is recorded, so it is not fetched again
+    assert env.world.scalar(
+        "SELECT last_checked_at > now() - interval '1 minute' AND next_check_at > now() + interval '1 hour' "
+        "FROM external_resources WHERE id = :r", r=resource["id"],
+    )  # fmt: skip
+    # Its own visible version and its deduplication key are untouched; the duplicated text is remembered apart.
+    assert (resource["state"], resource["current_document_id"], resource["content_sha256"]) == ("accepted", x["id"], _digest())
+    assert resource["duplicate_content_sha256"] == _digest(OTHER)
+    assert resource["duplicate_of_id"] == env.resource(8)["id"]
+    assert [(v["status"], v["stale_reason"]) for v in env.versions(7)] == [("indexed", None)]
+    assert env.count("SELECT count(*) FROM documents WHERE course_id = :c") == 2
+    jobs_sql = "SELECT count(*) FROM ingestion_jobs j JOIN documents d ON d.id = j.document_id WHERE d.course_id = :c"
+    assert env.count(jobs_sql) == 2
+    assert not _orphaned(env, 7)  # page 8 still holds the text
+
+
+def test_a_recorded_duplicate_revision_recovers_when_its_holder_changes_text(env):
+    x, _ = _accepted_pair(env)
+    env.persist(7, 43, extra=OTHER)
+    assert env.persist(8, 81, extra=" Rewritten.") is Outcome.NEW_VERSION
+    assert not _orphaned(env, 7)  # page 8's old version is still indexed and visible: it still holds the text
+    _, y2 = env.versions(8)
+    assert index_now(env.factory, env.world, y2["id"]) is CompletionStatus.COMPLETED
+    assert _orphaned(env, 7)  # nobody holds the text now: reconsidered although revision 43 is unchanged
+    assert env.persist(7, 43, extra=OTHER) is Outcome.NEW_VERSION
+    resource = env.resource(7)
+    assert (resource["content_sha256"], resource["duplicate_content_sha256"], resource["duplicate_of_id"]) == (
+        _digest(OTHER), None, None,
+    )  # fmt: skip
+    v1, v2 = env.versions(7)
+    assert (v1["id"], v1["status"], v2["status"], v2["revision_id"]) == (x["id"], "indexed", "pending", 43)
+    assert index_now(env.factory, env.world, v2["id"]) is CompletionStatus.COMPLETED  # only now is X replaced
+    assert [(v["status"], v["stale_reason"]) for v in env.versions(7)] == [("stale", "superseded"), ("indexed", None)]
+
+
+def test_a_recorded_duplicate_revision_recovers_when_its_holder_is_confirmed_missing(env):
+    _accepted_pair(env)
+    env.persist(7, 43, extra=OTHER)
+    _confirm_missing(env, 8)
+    assert _orphaned(env, 7)
+    assert env.persist(7, 43, extra=OTHER) is Outcome.NEW_VERSION
+    assert [v["status"] for v in env.versions(7)] == ["indexed", "pending"]
+
+
+def test_returning_to_its_own_text_forgets_the_recorded_duplicate(env):
+    _accepted_pair(env)
+    env.persist(7, 43, extra=OTHER)
+    assert env.persist(7, 44) is Outcome.UNCHANGED  # text X again, under a newer revision
+    resource = env.resource(7)
+    marker = (resource["duplicate_content_sha256"], resource["duplicate_of_id"])
+    assert (resource["last_revision_id"], marker) == (44, (None, None))
+    assert len(env.versions(7)) == 1 and not _orphaned(env, 7)
+
+
+def test_a_missing_page_that_returns_with_held_text_becomes_a_tracked_duplicate(env):
+    _accepted_pair(env)
+    env.persist(7, 43, extra=OTHER)
+    _confirm_missing(env, 7)
+    resource = env.resource(7)
+    assert (resource["state"], resource["duplicate_content_sha256"], resource["duplicate_of_id"]) == ("missing", None, None)
+    assert env.persist(7, 45, extra=OTHER) is Outcome.DUPLICATE
+    resource = env.resource(7)
+    assert (resource["state"], resource["duplicate_of_id"], resource["content_sha256"]) == (
+        "duplicate", env.resource(8)["id"], _digest(OTHER),
+    )  # fmt: skip
+    assert (resource["last_revision_id"], resource["missing_checks"], resource["missing_since"]) == (45, 0, None)
+    assert [v["status"] for v in env.versions(7)] == ["stale"]  # nothing resurrected, nothing created
+
+
+def test_a_recorded_duplicate_still_counts_against_the_quota(world):
+    env = Env(world, quota=2)
+    _accepted_pair(env)
+    env.persist(7, 43, extra=OTHER)
+    assert env.persist(9, 90, extra=" Unrelated third text.") is Outcome.QUOTA  # page 7's version is still visible
+
+
+def test_concurrent_recovery_of_one_duplicated_text_creates_one_holder(env):
+    _accepted_pair(env)
+    assert env.persist(9, 90, extra=" A third text.") is Outcome.ACCEPTED
+    (z,) = env.versions(9)
+    index_now(env.factory, env.world, z["id"])
+    assert env.persist(7, 43, extra=OTHER) is Outcome.DUPLICATE
+    assert env.persist(9, 91, extra=OTHER) is Outcome.DUPLICATE
+    _confirm_missing(env, 8)  # nobody holds the text now: both pages are reconsidered at once
+    assert _orphaned(env, 7) and _orphaned(env, 9)
+    barrier = threading.Barrier(2)
+
+    def attempt(page_rev):
+        barrier.wait()
+        return env.persist(*page_rev, extra=OTHER)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(attempt, [(7, 43), (9, 91)]))
+    assert sorted(o.value for o in outcomes) == ["duplicate", "new_version"]
+    winner, loser = (7, 9) if outcomes[0] is Outcome.NEW_VERSION else (9, 7)
+    assert env.resource(loser)["duplicate_of_id"] == env.resource(winner)["id"]
+    assert env.resource(loser)["duplicate_content_sha256"] == _digest(OTHER) and not _orphaned(env, loser)
+    assert env.count("SELECT count(*) FROM documents WHERE course_id = :c AND status = 'pending'") == 1
+
+
 def test_course_quota_is_enforced(world):
     env = Env(world, quota=1)
     assert env.persist(7, 42) is Outcome.ACCEPTED
