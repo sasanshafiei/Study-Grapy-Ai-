@@ -41,6 +41,7 @@ One statement for the whole list (no N+1), ordered by name then id, never trunca
 
 Readers of the course (owner professor, enrolled student). Ordered by name. 404 for a
 missing course and for a course the caller cannot read (ids cannot be probed).
+Topics are loaded by an operator import, see [course-topics.md](course-topics.md).
 
 ## `POST /api/v1/courses` (professors)
 
