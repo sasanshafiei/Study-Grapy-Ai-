@@ -64,7 +64,12 @@ from sqlalchemy.pool import NullPool
 
 from .. import storage_identity
 from ..config import Settings
-from ..database_compatibility import REQUIRED_SCHEMA_REVISION, IncompatibleDatabase, check_database_compatibility
+from ..database_compatibility import (
+    REQUIRED_SCHEMA_REVISION,
+    IncompatibleDatabase,
+    check_database_compatibility,
+    requires_unprivileged_role,
+)
 from ..migration_safety import UnsafeMigrationTarget, describe_target, resolve_migration_url, verify_connection
 from ..storage import LocalFileStorage
 from ..indexing.client import AiIndexClient, InvalidServiceUrl, parse_service_url
@@ -140,12 +145,15 @@ def verified_engine(target: DatabaseTarget) -> Engine:
     return engine
 
 
-def check_database(target: DatabaseTarget) -> None:
-    """Check application compatibility on an identity-verified worker connection."""
+def check_database(target: DatabaseTarget, *, environment: str = "development") -> None:
+    """Check application compatibility on an identity-verified worker connection.
+
+    Outside development and test the worker's role must also be unprivileged (F05).
+    """
     engine = verified_engine(target)
     try:
         with engine.connect() as connection:
-            check_database_compatibility(connection)
+            check_database_compatibility(connection, unprivileged=requires_unprivileged_role(environment))
     except (UnsafeMigrationTarget, IncompatibleDatabase) as exc:
         raise PreflightError(str(exc)) from None
     finally:
@@ -155,7 +163,7 @@ def check_database(target: DatabaseTarget) -> None:
 def worker_preflight(settings: Settings, environ: Mapping[str, str] = os.environ) -> None:
     require_environment(environ, WORKER_ENVIRONMENT)
     target = database_target(environ)
-    check_database(target)
+    check_database(target, environment=settings.environment)
     log.info("worker preflight: database %s verified at revision %s", describe_target(target.url), REQUIRED_SCHEMA_REVISION)
     engine = verified_engine(target)
     try:
@@ -203,7 +211,7 @@ def index_worker_preflight(settings: Settings, environ: Mapping[str, str] = os.e
     require_environment(environ, INDEX_WORKER_ENVIRONMENT)
     check_ai_settings(settings, environ)
     target = database_target(environ)
-    check_database(target)
+    check_database(target, environment=settings.environment)
     log.info(
         "index worker preflight: database %s verified at revision %s",
         describe_target(target.url), REQUIRED_SCHEMA_REVISION,
@@ -228,7 +236,7 @@ def harvest_worker_preflight(settings: Settings, environ: Mapping[str, str] = os
         except ValueError as exc:
             raise PreflightError(str(exc)) from None
     target = database_target(environ)
-    check_database(target)
+    check_database(target, environment=settings.environment)
     log.info(
         "harvest worker preflight: database %s verified at revision %s",
         describe_target(target.url), REQUIRED_SCHEMA_REVISION,
@@ -255,7 +263,7 @@ def mastery_worker_preflight(settings: Settings, environ: Mapping[str, str] = os
         if pins_of(settings) is None:  # Settings already refused malformed or missing pins; defence in depth
             raise PreflightError("the mastery pins must be complete while MASTERY_DELIVERY_ENABLED is true")
     target = database_target(environ)
-    check_database(target)
+    check_database(target, environment=settings.environment)
     log.info(
         "mastery worker preflight: database %s verified at revision %s",
         describe_target(target.url), REQUIRED_SCHEMA_REVISION,

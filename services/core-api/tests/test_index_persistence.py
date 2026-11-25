@@ -5,7 +5,6 @@ import multiprocessing
 import threading
 import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -15,12 +14,12 @@ from sqlalchemy.orm import sessionmaker
 from app.indexing.payload import idempotency_key, request_for
 from app.ingestion import jobs
 from tests.alembic_cli import run_alembic
+from tests.test_db_privileges import run_script
 from tests.disposable_db import verify_connection
 from tests.index_writer import COMMIT, parameters
 from tests.test_index_jobs import _parsed
 
 VISIBLE = text("SELECT id FROM public.retrieve_index_chunks(:course, ARRAY['class','external'])")
-GRANTS = Path(__file__).resolve().parents[1] / "scripts/index_privileges.sql"
 
 
 @pytest.fixture
@@ -186,12 +185,10 @@ def test_role_capabilities_on_real_database(world, batch):
     chunks = json.loads(data["chunks"])
     chunks[0]["topic_ids"] = [str(topic)]
     data["chunks"] = json.dumps(chunks)
-    # Transactional provisioning exercises the shipped grants, scoped to this disposable session.
+    # Transactional provisioning exercises the shipped role and grant scripts, scoped to this disposable session.
     with world.engine.connect() as c, c.begin() as tx:
-        for role in ("studygraph_ai_indexer", "studygraph_ai_retriever", "studygraph_ce_runtime"):
-            c.exec_driver_sql(f"CREATE ROLE {role} NOLOGIN")
-        c.exec_driver_sql("GRANT SELECT ON documents, chunks, document_sections TO studygraph_ce_runtime")
-        c.exec_driver_sql(GRANTS.read_text())
+        run_script(c, "db_roles.sql")
+        run_script(c, "db_privileges.sql")
         c.exec_driver_sql("SET LOCAL ROLE studygraph_ai_indexer")
         assert c.execute(COMMIT, data).one() == (2, False)
         for sql in ("SELECT * FROM users LIMIT 0", "SELECT answer_key FROM questions LIMIT 0",

@@ -10,7 +10,7 @@ from .chat.client import AiChatClient
 from .config import Settings
 from .cors import ExactOriginCORS
 from .config import settings as default_settings
-from .database_compatibility import IncompatibleDatabase, check_database_compatibility
+from .database_compatibility import IncompatibleDatabase, check_database_compatibility, requires_unprivileged_role
 from .db import SessionLocal, create_engine_and_session_factory, get_db
 from .errors import ApiError, api_error_handler, unhandled_error_handler
 from .indexing.client import InvalidServiceUrl
@@ -147,7 +147,9 @@ def create_app(
         """Core API readiness. Requires the application's PostgreSQL schema revision and pgvector in public."""
         try:
             db.execute(text("SET LOCAL statement_timeout = '2s'"))
-            check_database_compatibility(db.connection())
+            check_database_compatibility(
+                db.connection(), unprivileged=requires_unprivileged_role(settings.environment)
+            )
         except (IncompatibleDatabase, SQLAlchemyError):
             raise ApiError(503, "not_ready", "The database is not ready.", headers={"Cache-Control": "no-store"}) from None
         response.headers["Cache-Control"] = "no-store"

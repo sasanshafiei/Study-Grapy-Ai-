@@ -40,8 +40,10 @@ Then, in another terminal, create the tables with the Alembic migrations and
 check everything is wired:
 
 ```bash
-docker compose exec core-api alembic upgrade head
-docker compose exec core-api alembic current   # expect: 0009 (head) for this version
+docker compose run --rm migrate                  # alembic upgrade head, as the schema owner
+docker compose run --rm db-init                  # runtime roles and grants: explicit, after every migration
+docker compose up -d                             # restart the API and workers as studygraph_app
+docker compose exec core-api alembic current     # expect: 0011 (head) for this version
 docker compose exec core-api python -m app.ingestion.admin init-storage --database studygraph   # once
 
 curl localhost:8000/health        # core-api process liveness

@@ -42,7 +42,7 @@ def test_readiness_uses_each_apps_database_without_requiring_ai(head_database, d
     unavailable = good.set(port=1, password="private-probe-password", query={"connect_timeout": "2"})
 
     def settings(url):
-        return Settings(database_url=url.render_as_string(hide_password=False), environment="probe-test",
+        return Settings(database_url=url.render_as_string(hide_password=False), environment="test",
                         ai_service_url="http://127.0.0.1:1",
                         indexing_enabled=False, quiz_enabled=False, chat_enabled=False, mastery_delivery_enabled=False)
 
@@ -54,7 +54,7 @@ def test_readiness_uses_each_apps_database_without_requiring_ai(head_database, d
         assert response.headers["Cache-Control"] == "no-store"
         assert_unready(down.get("/health/ready"))
         live = down.get("/health")
-        assert live.status_code == 200 and live.json() == {"status": "ok", "service": "core-api", "env": "probe-test"}
+        assert live.status_code == 200 and live.json() == {"status": "ok", "service": "core-api", "env": "test"}
         diagnostic = down.get("/health/db")
         assert diagnostic.status_code == 500 and diagnostic.json()["code"] == "server_error"
         assert "private-probe-password" not in diagnostic.text

@@ -1,8 +1,16 @@
+# Database identities (F05, docs/database-security.md). The API and every worker connect as
+# studygraph_app, a login in the unprivileged studygraph_ce_runtime group (row access only, no DDL,
+# not an owner). Only the `migrate` tool below connects as the schema owner, which in this development
+# stack is the image's bootstrap superuser `studygraph`. `up` never provisions roles: run the `db-init`
+# tool once per database volume (until then the runtime services cannot log in). Development credentials
+# only: staging and production get their own secrets and never use these defaults or db-init.
+x-runtime-database-url: &runtime-database-url postgresql+psycopg://studygraph_app:${STUDYGRAPH_APP_DB_PASSWORD:-studygraph-app-dev-only}@db:5432/studygraph
+
 # Shared by the M3 worker services below.
 x-ingestion-worker: &ingestion-worker
   build: ./services/core-api
   environment:
-    DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+    DATABASE_URL: *runtime-database-url
     REDIS_URL: redis://redis:6379/0
     UPLOAD_DIR: /data/uploads
     ENVIRONMENT: development
@@ -22,8 +30,9 @@ services:
       POSTGRES_USER: studygraph
       POSTGRES_PASSWORD: studygraph
       POSTGRES_DB: studygraph
-    ports:
-      - "5432:5432"
+    # No host port (F05): every service reaches PostgreSQL as db:5432 on the Compose network. To use it
+    # from the host, publish it on loopback only, in an untracked docker-compose.override.yml:
+    #   services: { db: { ports: ["127.0.0.1:5432:5432"] } }
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -32,6 +41,46 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # Development role provisioning (F05). An explicit operator action, never started by `up`: it changes
+  # roles, grants and the studygraph_app password, so it runs only when you ask for it. Idempotent; as the
+  # bootstrap superuser over the Compose network only. Creates the unprivileged groups and the
+  # studygraph_app login (password from STUDYGRAPH_APP_DB_PASSWORD) and, once the schema is migrated,
+  # applies services/core-api/scripts/db_privileges.sql. Run it once per database volume and after every
+  # migration (docs/database-security.md):
+  #   docker compose run --rm migrate && docker compose run --rm db-init
+  db-init:
+    image: pgvector/pgvector:pg16
+    profiles: ["tools"]
+    command: ["sh", "/provision/dev-provision.sh"]
+    environment:
+      PGHOST: db
+      PGDATABASE: studygraph
+      PGUSER: studygraph
+      PGPASSWORD: studygraph
+      STUDYGRAPH_APP_DB_PASSWORD: ${STUDYGRAPH_APP_DB_PASSWORD:-studygraph-app-dev-only}
+    volumes:
+      - ./infra/postgres/dev-provision.sh:/provision/dev-provision.sh:ro
+      - ./services/core-api/scripts:/provision/scripts:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Schema migrations (F05): the only service that connects as the schema owner. Never started by `up`:
+  #   docker compose run --rm migrate                    # alembic upgrade head
+  #   docker compose run --rm migrate alembic current
+  migrate:
+    build: ./services/core-api
+    profiles: ["tools"]
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+      ENVIRONMENT: development
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./services/core-api:/app
 
   redis:
     image: redis:7
@@ -45,7 +94,7 @@ services:
   core-api:
     build: ./services/core-api
     environment:
-      DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+      DATABASE_URL: *runtime-database-url
       REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8000
       ENVIRONMENT: development
@@ -109,7 +158,7 @@ services:
     # both database-only (no upstream call): mastery recovery/dispatch and the
     # analytics releases / study-event retention.
     environment:
-      DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+      DATABASE_URL: *runtime-database-url
       REDIS_URL: redis://redis:6379/0
       UPLOAD_DIR: /data/uploads
       ENVIRONMENT: development
@@ -131,7 +180,7 @@ services:
       celery -A app.worker worker -Q ingestion.index -c 2 -P prefork -n index@%h
       --without-mingle --without-gossip --without-heartbeat -l INFO
     environment:
-      DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+      DATABASE_URL: *runtime-database-url
       REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8000
       INDEXING_ENABLED: "false"
@@ -164,7 +213,7 @@ services:
       celery -A app.worker worker -Q harvest.run -c 1 -P prefork -n harvest@%h
       --without-mingle --without-gossip --without-heartbeat -l INFO
     environment:
-      DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+      DATABASE_URL: *runtime-database-url
       REDIS_URL: redis://redis:6379/0
       HARVEST_ENABLED: "false"
       ENVIRONMENT: development
@@ -191,7 +240,7 @@ services:
       celery -A app.worker worker -Q mastery.deliver -c 2 -P prefork -n mastery@%h
       --without-mingle --without-gossip --without-heartbeat -l INFO
     environment:
-      DATABASE_URL: postgresql+psycopg://studygraph:studygraph@db:5432/studygraph
+      DATABASE_URL: *runtime-database-url
       REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8000
       MASTERY_DELIVERY_ENABLED: "false"
