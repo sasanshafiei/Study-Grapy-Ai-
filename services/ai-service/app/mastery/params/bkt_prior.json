@@ -1,0 +1,12 @@
+{
+  "model": {"name": "studygraph-bkt", "version": "0.1.0-prior"},
+  "source": "Literature priors (Corbett & Anderson 1995; Baker et al. 2008 ranges). Replace with the ASSISTments fit from eval/mastery/run_baseline.py and bump the version.",
+  "p_init": 0.3,
+  "p_transit": 0.12,
+  "emissions": {
+    "easy": {"guess": 0.3, "slip": 0.06},
+    "medium": {"guess": 0.2, "slip": 0.1},
+    "hard": {"guess": 0.12, "slip": 0.16}
+  },
+  "guess_floor": {"mcq": 0.25, "true_false": 0.5}
+}
