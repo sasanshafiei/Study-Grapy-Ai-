@@ -79,12 +79,19 @@ services:
       dockerfile: services/ai-service/Dockerfile
     environment:
       AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
+      # AI-2 mastery provider (services/ai-service/app/mastery). "fixture" keeps the mock;
+      # "real" needs MASTERY_STATE_EPOCH, the same epoch CE pins (docs/ai2-mastery-provider.md).
+      MASTERY_PROVIDER: ${MASTERY_PROVIDER:-fixture}
+      MASTERY_STATE_EPOCH: ${MASTERY_STATE_EPOCH:-}
+      MASTERY_STATE_PATH: /data/mastery/state.sqlite3
     ports:
       - "8001:8000"
     volumes:
       - ./services/ai-service:/app
       - ./contracts/ai-service.openapi.yaml:/contracts/ai-service.openapi.yaml:ro
       - ./contracts/fixtures:/contracts/fixtures:ro
+      # Learner model state: must persist, or CE detects lost state and blocks delivery.
+      - ai_mastery_state:/data/mastery
 
   # --- Asynchronous document processing (M3, docs/document-processing.md) --------------
   # Same image and code as core-api. They never run migrations: each worker
@@ -222,3 +229,4 @@ services:
 volumes:
   pgdata:
   uploads:
+  ai_mastery_state:
