@@ -1,7 +1,6 @@
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Response
-from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -9,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .celery_app import make_celery
 from .chat.client import AiChatClient
 from .config import Settings
+from .cors import ExactOriginCORS
 from .config import settings as default_settings
 from .database_compatibility import IncompatibleDatabase, check_database_compatibility
 from .db import SessionLocal, create_engine_and_session_factory, get_db
@@ -107,14 +107,10 @@ def create_app(
         settings.exam_export_rate_limit, settings.exam_export_rate_window_seconds, settings.exam_export_rate_max_users
     )
 
-    # Wide-open CORS for development so web + mobile can call freely.
-    # Tighten this before any public deployment.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # F12: exact-origin CORS for the allowlisted browser origins only (app/cors.py). With the
+    # empty default no CORS headers are sent; native and server clients are unaffected.
+    if settings.cors_allowed_origins:
+        app.add_middleware(ExactOriginCORS, allowed_origins=settings.cors_allowed_origins)
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_exception_handler(Exception, unhandled_error_handler)  # JSON 500, details only in the log
     app.include_router(documents.router)

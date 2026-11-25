@@ -74,6 +74,11 @@ proposed AI indexing interface is in
 
 Interactive API docs: http://localhost:8000/docs and http://localhost:8001/docs
 
+Browsers may call core-api cross-origin only from the exact origins in `CORS_ALLOWED_ORIGINS`
+(Compose allows the web dev server, `http://localhost:3000`; the default is same-origin only).
+Staging and production must list their https origins; see
+[docs/frontend-exam-adaptation.md](docs/frontend-exam-adaptation.md#browser-origins-and-readable-headers).
+
 The old `python init_db.py` step is deprecated and no longer creates tables. If
 your database was created with it, adopt it instead of re-running anything; see
 [docs/database-migrations.md](docs/database-migrations.md). That document also
