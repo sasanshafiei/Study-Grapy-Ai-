@@ -1,0 +1,90 @@
+{
+  "source": "ASSISTments skill builder: skill_builder_data_corrected_collapsed.csv",
+  "seed": 7,
+  "rows": {
+    "train": 206531,
+    "test": 52778
+  },
+  "users": {
+    "train": 3331,
+    "test": 832
+  },
+  "topics": 145,
+  "models": {
+    "majority": {
+      "auc": 0.5,
+      "f1": 0.7849,
+      "accuracy": 0.6459,
+      "rmse": 0.4785,
+      "log_loss": 0.6505
+    },
+    "logreg_agnostic": {
+      "auc": 0.7175,
+      "f1": 0.7798,
+      "accuracy": 0.6936,
+      "rmse": 0.4463,
+      "log_loss": 0.5838
+    },
+    "logreg_skill_reference": {
+      "auc": 0.7219,
+      "f1": 0.7815,
+      "accuracy": 0.6957,
+      "rmse": 0.4445,
+      "log_loss": 0.58
+    },
+    "bkt_unbounded_reference": {
+      "auc": 0.7105,
+      "f1": 0.7894,
+      "accuracy": 0.6973,
+      "rmse": 0.4475,
+      "log_loss": 0.5876,
+      "train_nll": 0.5352,
+      "theta": [
+        0.7988,
+        0.0835,
+        0.45,
+        0.2099,
+        0.0739,
+        0.0574,
+        0.2039,
+        0.4373
+      ]
+    },
+    "bkt_difficulty": {
+      "auc": 0.7096,
+      "f1": 0.7896,
+      "accuracy": 0.6898,
+      "rmse": 0.4481,
+      "log_loss": 0.5886,
+      "train_nll": 0.5453
+    }
+  },
+  "bkt_params": {
+    "model": {
+      "name": "studygraph-bkt",
+      "version": "1.0.0-assist09"
+    },
+    "source": "ASSISTments skill builder: skill_builder_data_corrected_collapsed.csv",
+    "p_init": 0.750593,
+    "p_transit": 0.092727,
+    "emissions": {
+      "easy": {
+        "guess": 0.3,
+        "slip": 0.051082
+      },
+      "medium": {
+        "guess": 0.260529,
+        "slip": 0.193874
+      },
+      "hard": {
+        "guess": 0.09115,
+        "slip": 0.3
+      }
+    },
+    "guess_floor": {
+      "mcq": 0.25,
+      "true_false": 0.5
+    }
+  },
+  "seconds": 232.8
+}
