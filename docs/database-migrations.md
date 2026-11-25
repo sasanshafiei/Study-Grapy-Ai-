@@ -84,14 +84,19 @@ Metadata-only: no backfill, no rewrite of existing rows.
 
 ```bash
 docker compose up -d --build                       # start the stack (rebuild after dependency changes)
-docker compose exec core-api alembic upgrade head  # create / update the schema
+docker compose run --rm migrate                    # create / update the schema, as the schema owner
+docker compose run --rm db-init                    # then re-apply the runtime grants (F05)
 docker compose exec core-api alembic current       # revision the database is at, e.g. "0004 (head)"
 docker compose exec core-api alembic history       # all revisions
 docker compose exec core-api alembic check         # models vs. database: expect "No new upgrade operations detected."
 docker compose exec core-api alembic upgrade head --sql   # print the SQL only, connect to nothing
 ```
 
-A brand-new database volume needs nothing but `alembic upgrade head`.
+A brand-new database volume needs nothing but `alembic upgrade head` (then `db-init`).
+The API and workers connect as the unprivileged `studygraph_app` login, which cannot run DDL:
+`docker compose exec core-api alembic upgrade head` is refused with `permission denied for schema public`.
+Read-only commands (`current`, `history`, `check`, `--sql`) still work there. See
+[database-security.md](database-security.md).
 A database created earlier by `init_db.py` needs adopting first, see below. Running
 `upgrade` on it fails with `relation "users" already exists` and changes nothing
 (PostgreSQL runs the whole migration in one transaction).

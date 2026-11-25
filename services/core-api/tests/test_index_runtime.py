@@ -47,7 +47,7 @@ def _env(**overrides):
 
 def test_index_preflight_does_not_require_the_upload_dir(monkeypatch):
     checked = []
-    monkeypatch.setattr(runtime, "check_database", lambda target: checked.append(target))
+    monkeypatch.setattr(runtime, "check_database", lambda target, **_: checked.append(target))
     runtime.index_worker_preflight(Settings(indexing_enabled=False), _env())  # no UPLOAD_DIR
     assert len(checked) == 1
 
@@ -71,14 +71,14 @@ def test_processing_preflight_still_requires_the_upload_dir():
     ],
 )
 def test_index_preflight_refusals(env, enabled, message, monkeypatch):
-    monkeypatch.setattr(runtime, "check_database", lambda target: None)
+    monkeypatch.setattr(runtime, "check_database", lambda target, **_: None)
     with pytest.raises(PreflightError, match=message):
         runtime.index_worker_preflight(Settings(indexing_enabled=enabled, ai_service_url=env.get("AI_SERVICE_URL", "x")), env)
 
 
 def test_index_preflight_makes_no_network_call_to_the_ai_service(monkeypatch, caplog):
     """Start-up is outside every Celery time limit: no probe, even with indexing enabled."""
-    monkeypatch.setattr(runtime, "check_database", lambda target: None)
+    monkeypatch.setattr(runtime, "check_database", lambda target, **_: None)
     monkeypatch.setattr("socket.create_connection", lambda *a, **k: pytest.fail("no connection at start-up"))
     caplog.set_level(logging.INFO)
     settings = Settings(indexing_enabled=True, ai_service_url="http://127.0.0.1:9", ai_service_token=TOKEN)

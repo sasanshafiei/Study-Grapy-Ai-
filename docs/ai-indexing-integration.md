@@ -307,7 +307,7 @@ AI-1 reads through `public.retrieve_index_chunks(course_uuid, allowed_origins_te
 
 CE-3 provisions distinct non-owner login identities and the three fresh unprivileged groups named in the grant script. Use separate credentials/pools, private transport, timeouts and secret rotation. Service identities must lack superuser, role creation, database creation, replication, bypass-RLS, schema CREATE, and inherited table or owner grants. Audit effective PUBLIC grants and role memberships on the target, including older PostgreSQL deployments. The two definer-rights entry points use qualified objects and a fixed search path. The migration revokes PUBLIC execution within the DDL transaction.
 
-Apply the F03 grant script as the owner in one transaction on the approved target after the migration. For psql, use `-X --single-transaction -v ON_ERROR_STOP=1 -f services/core-api/scripts/index_privileges.sql`. This is an incremental grant set for an existing CE runtime. The compose development superuser remains a separate F05 concern. [Grant script](../services/core-api/scripts/index_privileges.sql)
+The F03 grants are part of the complete F05 grant script, applied as the owner in one transaction after every migration: `psql -X --single-transaction -v ON_ERROR_STOP=1 -f services/core-api/scripts/db_privileges.sql`, after the cluster groups from `db_roles.sql`. Roles, rollout and rollback: [database-security.md](database-security.md).
 
 ### Existing data and rollout
 

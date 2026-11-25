@@ -1,5 +1,7 @@
 # Secrets
 .env
+# Local docker-compose overrides (e.g. a loopback-only database port)
+docker-compose.override.yml
 *.env
 !.env.example
 
