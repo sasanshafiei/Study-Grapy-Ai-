@@ -21,6 +21,13 @@ transaction together with the run's progress. Later revisions:
   its own provider revision is unchanged.
 - same normalized content (whatever the revision id): nothing new is
   created; the resource remembers the revision it checked.
+- content another accepted resource holds (WP-5): nothing new is created and
+  nothing is staled. An accepted resource keeps its visible version and its
+  content_sha256, records the revision and its refresh bookkeeping, and stores
+  the duplicated digest in duplicate_content_sha256, so the revision is not
+  fetched again while that content is held and is reconsidered (and becomes a
+  new version) once nobody holds it (ORPHANED_DUPLICATE_SQL). A missing
+  resource whose page returns with held content becomes a duplicate.
 - different content: a new document version, unless a version of the
   resource is still `pending` (then nothing is created now and the revision
   is not recorded, so the next refresh looks again).
@@ -104,7 +111,7 @@ def _resource(session: Session, run: RunClaim, page_id: int):
     return session.execute(
         text(
             "SELECT r.id, r.state, r.current_document_id, r.content_sha256, r.last_revision_id, r.missing_checks, "
-            "d.status AS current_status FROM external_resources r "
+            "r.duplicate_content_sha256, d.status AS current_status FROM external_resources r "
             "LEFT JOIN documents d ON d.id = r.current_document_id "
             "WHERE r.course_id = :c AND r.source_id = :s AND r.page_id = :p FOR NO KEY UPDATE OF r"
         ),
@@ -126,11 +133,15 @@ HOLDER_PREDICATE = (
 
 # Evaluated on a resource aliased `r`: a duplicate whose content no accepted resource holds any more (the
 # referenced resource changed content, went missing, ...) must be reconsidered at its next check even if its own
-# provider revision did not change (app/harvest/executor.py).
+# provider revision did not change (app/harvest/executor.py). The same holds for an accepted resource whose
+# recorded newest revision duplicated another's content (duplicate_content_sha256).
 ORPHANED_DUPLICATE_SQL = (
-    "(r.state = 'duplicate' AND NOT EXISTS (SELECT 1 FROM external_resources o WHERE "
+    "((r.state = 'duplicate' AND NOT EXISTS (SELECT 1 FROM external_resources o WHERE "
     + HOLDER_PREDICATE.format(course="r.course_id", me="r.id", digest="r.content_sha256")
-    + "))"
+    + ")) OR (r.state = 'accepted' AND r.duplicate_content_sha256 IS NOT NULL AND NOT EXISTS "
+    "(SELECT 1 FROM external_resources o WHERE "
+    + HOLDER_PREDICATE.format(course="r.course_id", me="r.id", digest="r.duplicate_content_sha256")
+    + ")))"
 )
 
 
@@ -209,8 +220,8 @@ def _create_version(
     )
     session.execute(
         text(
-            "UPDATE external_resources SET state = 'accepted', duplicate_of_id = NULL, current_document_id = :d, "
-            "content_sha256 = :hash, last_revision_id = :rev, title = :title, canonical_url = :url, "
+            "UPDATE external_resources SET state = 'accepted', duplicate_of_id = NULL, duplicate_content_sha256 = NULL, "
+            "current_document_id = :d, content_sha256 = :hash, last_revision_id = :rev, title = :title, canonical_url = :url, "
             "missing_since = NULL, missing_checks = 0, missing_evidence = NULL, last_checked_at = now(), "
             "next_check_at = now() + :interval * interval '1 second', updated_at = now() WHERE id = :r"
         ),
@@ -225,6 +236,14 @@ def _create_version(
         },
     )
     return document_id
+
+
+def _mark_duplicate(session: Session, resource_id: uuid.UUID, holder: uuid.UUID | None, digest: str | None) -> None:
+    """An accepted resource's newest revision duplicates `holder`'s content `digest` (None: it no longer does)."""
+    session.execute(
+        text("UPDATE external_resources SET duplicate_of_id = :d, duplicate_content_sha256 = :h WHERE id = :r"),
+        {"d": holder, "h": digest, "r": resource_id},
+    )
 
 
 def _checked(session: Session, resource_id: uuid.UUID, gates: _Gates, *, revision_id: int | None = None,
@@ -271,20 +290,25 @@ def _decide(
             and resource.current_status in ("pending", "indexed", "failed")
         ):
             # Same normalized text, even under a new revision id: no document, no job.
+            if resource.duplicate_content_sha256 is not None:  # back to its own text: no duplicate revision now
+                _mark_duplicate(session, resource.id, None, None)
             _checked(session, resource.id, gates, revision_id=fetched.revision_id)
             return Outcome.UNCHANGED
         if resource.current_status == "pending":
             return Outcome.PENDING  # one pending version at a time; looked at again next refresh
         duplicate = _duplicate_of(session, run.course_id, fetched.content_sha256, resource.id)
         if duplicate is not None:
-            if resource.state == "duplicate":
+            if resource.state == "accepted":
+                # Its visible version and content_sha256 (the dedup key of that version) stay; the revision is
+                # recorded with the duplicated digest, so it is fetched again only once nobody holds that text.
+                _mark_duplicate(session, resource.id, duplicate, fetched.content_sha256)
+                _checked(session, resource.id, gates, revision_id=fetched.revision_id)
+            else:  # duplicate, or missing and back with held text: tracked as a duplicate, nothing visible
                 session.execute(
-                    text("UPDATE external_resources SET duplicate_of_id = :d WHERE id = :r"),
+                    text("UPDATE external_resources SET state = 'duplicate', duplicate_of_id = :d WHERE id = :r"),
                     {"d": duplicate, "r": resource.id},
                 )
                 _checked(session, resource.id, gates, revision_id=fetched.revision_id, digest=fetched.content_sha256)
-            # An accepted resource whose new text equals another's keeps its current
-            # version (nothing switched, revision not recorded: it is looked at again).
             return Outcome.DUPLICATE
         if resource.state != "accepted" and _accepted_count(session, run.course_id) >= gates.max_active_documents:
             return Outcome.QUOTA
@@ -418,6 +442,8 @@ def record_gone(
             evidence = session.execute(
                 text(
                     "UPDATE external_resources SET state = 'missing', missing_checks = missing_checks + 1, "
+                    "duplicate_of_id = CASE WHEN duplicate_content_sha256 IS NULL THEN duplicate_of_id END, "
+                    "duplicate_content_sha256 = NULL, "
                     "missing_evidence = jsonb_set(missing_evidence, '{observations}', "
                     f"(missing_evidence -> 'observations') || jsonb_build_array({observed})), "
                     "last_checked_at = now(), next_check_at = now() + :interval * interval '1 second', "

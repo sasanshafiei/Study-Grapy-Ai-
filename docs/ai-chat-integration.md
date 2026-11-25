@@ -169,7 +169,16 @@ Public citation fields come from the records: `title` = `documents.title`; `url`
 `chunks.locator` — `{"page": n}` → **"Page n"** (the physical PDF page; slide
 numbers are not known), `{"slide": n}` → "Slide n" only if the indexer records real
 slide numbering, `{"section": s}` / `{"heading": s}` → "Section s"; `snippet` = the
-matching passage of `chunks.text`.
+matching passage of `chunks.text`; `provenance` (WP-5) = `null` for class material and for
+external material that was not harvested, otherwise the cited document version's own
+`external_document_versions` row: `{source_url, revision_id, revision_url, attribution, licence,
+licence_url}` (`source_url` = the version's `canonical_url`). The row is joined on the cited
+document id, so it is always that exact revision, and nothing in it comes from the AI response:
+the AI citation keys stay exactly `marker, chunk_id, document_id, origin, quote`, and any other key
+rejects the answer. A harvested document (`documents.external_resource_id` set) whose version row
+is missing, belongs to another resource, or carries an unsafe URL (not http(s), credentials,
+whitespace), an empty or multi-line attribution, a malformed licence identifier or a revision id
+outside 1..2^53-1 rejects the whole answer (`rejected`). Missing values are never filled in.
 
 **Limits of verification.** This establishes provenance: each quoted passage exists in
 a permitted, indexed source of this course. It does **not** prove that the passage

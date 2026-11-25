@@ -11,6 +11,7 @@ import uuid
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import sessionmaker
 
 from app.chat.db import (
     SHORT_LOCK_TIMEOUT_MS,
@@ -19,8 +20,19 @@ from app.chat.db import (
     authorize_read,
 )
 from app.chat.verify import INSUFFICIENT_EVIDENCE
+from app.harvest import persist
 from tests.api_support import asgi_call
 from tests.fake_chat_service import TOKEN, FakeChatService, answer_for
+from tests.harvest_support import (
+    claimed_run,
+    fetched,
+    harvest_settings,
+    index_now,
+    info,
+    opt_in,
+    versions_of,
+    wikipedia_source,
+)
 from tests.test_chat_unit import parse_sse_like_ce2
 
 LECTURE = (
@@ -28,7 +40,7 @@ LECTURE = (
     "Excess reactant remains after the reaction is complete."
 )
 QUOTE = "The limiting reactant limits the amount of product that can form."
-CITATION_KEYS = {"marker", "chunk_id", "origin", "title", "locator", "url", "snippet"}
+CITATION_KEYS = {"marker", "chunk_id", "origin", "title", "locator", "url", "snippet", "provenance"}
 
 
 @pytest.fixture
@@ -114,7 +126,7 @@ def test_grounded_answer_with_verified_citations(chat_api, fake, scene):
     assert set(citation) == CITATION_KEYS
     assert citation == {"marker": 1, "chunk_id": str(scene["chunk"]), "origin": "class",
                         "title": "Lecture 04 - Stoichiometry.pdf", "locator": "Page 12", "url": None,
-                        "snippet": QUOTE}  # fmt: skip
+                        "snippet": QUOTE, "provenance": None}  # fmt: skip
     capabilities, answer = fake.requests
     assert capabilities.path == "/ai/v1/chat/capabilities" and answer.path == "/ai/v1/chat/answer"
     sent = answer.json()
@@ -151,7 +163,98 @@ def test_external_citation_in_an_enabled_external_scope(chat_api, fake, world, s
     done = events(ask(api, scene["course"], scope="class_plus_external"))[-1][1]
     assert done["citations"][0]["url"] == "https://openstax.org/books/chemistry-2e/pages/4-4"
     assert done["citations"][0]["locator"] == "Section 4.4" and done["citations"][0]["origin"] == "external"
+    assert done["citations"][0]["provenance"] is None  # not harvested: no version record, nothing is filled in
     assert fake.requests[-1].json()["allowed_origins"] == ["class", "external"]
+
+
+# --- WP-5 / F09: version-specific provenance of harvested external material -----------------------------
+
+WIKI_TITLE = "Chemical equilibrium"
+EXTERNAL = {"chat_enabled_scopes": "class_only,class_plus_external"}
+
+
+class Harvested:
+    """Wikipedia pages harvested into a course through the real persistence path."""
+
+    def __init__(self, world, course) -> None:
+        self.world, self.course = world, course
+        self.source = wikipedia_source(world)
+        opt_in(world, course, self.source)
+        self.factory = sessionmaker(bind=world.engine)
+        self.settings = harvest_settings()
+        self.run = claimed_run(self.factory, self.settings, course, self.source)
+
+    def revision(self, rev: int, *, page: int = 7, extra: str = "") -> dict:
+        page_info, revision = info(page, rev, WIKI_TITLE), fetched(page, rev, WIKI_TITLE, extra=extra)
+        persist.persist_revision(self.factory, self.settings, self.run, page_info, revision, None)
+        return versions_of(self.world, page, self.course)[-1]
+
+    def citation(self, version: dict) -> dict:
+        chunk = self.world.rows("SELECT id, text FROM chunks WHERE document_id = :d ORDER BY id LIMIT 1", d=version["id"])[0]
+        return {"marker": 1, "chunk_id": str(chunk["id"]), "document_id": str(version["id"]), "origin": "external",
+                "quote": " ".join(chunk["text"].split())[:60]}  # fmt: skip
+
+
+def _ask_citing(api, fake, scene, citation):
+    fake.answer = lambda r: answer_for(r, answer="Equilibrium is dynamic [1].", citations=[citation])
+    return ask(api, scene["course"], scope="class_plus_external")
+
+
+def test_external_citation_carries_the_provenance_of_the_exact_cited_version(chat_api, fake, world, scene):
+    harvest = Harvested(world, scene["course"])
+    v1 = harvest.revision(42)
+    index_now(harvest.factory, world, v1["id"])
+    v2 = harvest.revision(50, extra=" Revised.")  # pending: version 1 stays the visible one
+    api = chat_api(**EXTERNAL).as_user(scene["student"])
+    (citation,) = events(_ask_citing(api, fake, scene, harvest.citation(v1)))[-1][1]["citations"]
+    stored = world.rows("SELECT * FROM external_document_versions WHERE document_id = :d", d=v1["id"])[0]
+    assert set(citation) == CITATION_KEYS and citation["url"] == "https://en.wikipedia.org/wiki/Chemical_equilibrium"
+    assert citation["provenance"] == {
+        "source_url": "https://en.wikipedia.org/wiki/Chemical_equilibrium", "revision_id": 42,
+        "revision_url": "https://en.wikipedia.org/w/index.php?oldid=42", "attribution": stored["attribution"],
+        "licence": "CC BY-SA 4.0", "licence_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+    }  # fmt: skip
+    assert "revision 42" in citation["provenance"]["attribution"]
+    # Version 2 indexed: its citation carries revision 50; the superseded version 1 cannot be cited any more.
+    index_now(harvest.factory, world, v2["id"])
+    (citation,) = events(_ask_citing(api, fake, scene, harvest.citation(v2)))[-1][1]["citations"]
+    assert (citation["provenance"]["revision_id"], citation["provenance"]["revision_url"]) == (
+        50, "https://en.wikipedia.org/w/index.php?oldid=50",
+    )  # fmt: skip
+    assert "revision 50" in citation["provenance"]["attribution"]
+    assert only_error(_ask_citing(api, fake, scene, harvest.citation(v1)))["code"] == "rejected"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "DELETE FROM external_document_versions WHERE document_id = :d",
+        "UPDATE external_document_versions SET licence_url = 'javascript:alert(1)' WHERE document_id = :d",
+        "UPDATE external_document_versions SET revision_url = 'https://user:pw@en.wikipedia.org/' WHERE document_id = :d",
+        "UPDATE external_document_versions SET attribution = E'Wikipedia\\nInjected' WHERE document_id = :d",
+        "UPDATE external_document_versions SET resource_id = :other, version = 99 WHERE document_id = :d",
+    ],
+)
+def test_missing_or_tampered_provenance_rejects_the_whole_answer(chat_api, fake, world, scene, tamper):
+    harvest = Harvested(world, scene["course"])
+    v1 = harvest.revision(42)
+    index_now(harvest.factory, world, v1["id"])
+    harvest.revision(90, page=9, extra=" Another article.")
+    other = world.scalar("SELECT id FROM external_resources WHERE course_id = :c AND page_id = 9", c=scene["course"])
+    world.execute(tamper, d=v1["id"], other=other)
+    api = chat_api(**EXTERNAL).as_user(scene["student"])
+    assert only_error(_ask_citing(api, fake, scene, harvest.citation(v1)))["code"] == "rejected"
+
+
+def test_model_supplied_attribution_is_never_accepted(chat_api, fake, world, scene):
+    harvest = Harvested(world, scene["course"])
+    v1 = harvest.revision(42)
+    index_now(harvest.factory, world, v1["id"])
+    api = chat_api(**EXTERNAL).as_user(scene["student"])
+    forged = {**harvest.citation(v1), "attribution": "Public domain, no attribution needed", "licence": "CC0"}
+    response = _ask_citing(api, fake, scene, forged)
+    assert only_error(response)["code"] == "rejected"
+    assert "Public domain" not in response.text and "CC0" not in response.text
 
 
 # --- before the stream: authentication, authorization, switches, body ------------------------------

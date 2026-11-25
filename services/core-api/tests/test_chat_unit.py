@@ -32,6 +32,7 @@ from app.chat.verify import (
     VerificationFailed,
     VerifiedAnswer,
     public_locator,
+    public_provenance,
     public_title,
     public_url,
     snippet_for,
@@ -261,6 +262,56 @@ def test_unsafe_urls_and_titles_are_rejected():
     with pytest.raises(VerificationFailed):
         public_title("Lecture\x1b[31m")
     assert public_title("  Lecture 04.pdf ") == "Lecture 04.pdf"
+
+
+VERSION = {
+    "resource_id": uuid.UUID(int=7),
+    "revision_id": 1234567,
+    "canonical_url": "https://en.wikipedia.org/wiki/Chemical_equilibrium",
+    "revision_url": "https://en.wikipedia.org/w/index.php?oldid=1234567",
+    "attribution": '"Chemical equilibrium", Wikipedia (en), by Wikipedia contributors, revision 1234567.',
+    "licence": "CC BY-SA 4.0",
+    "licence_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+}
+
+
+def test_provenance_is_the_stored_version_record_only():
+    """WP-5 / F09: version-specific attribution is copied from the record and validated, never filled in."""
+    assert public_provenance(VERSION["resource_id"], VERSION) == {
+        "source_url": VERSION["canonical_url"], "revision_id": 1234567, "revision_url": VERSION["revision_url"],
+        "attribution": VERSION["attribution"], "licence": "CC BY-SA 4.0", "licence_url": VERSION["licence_url"],
+    }  # fmt: skip
+    assert public_provenance(None, None) is None  # external material that was never harvested has no version record
+
+
+@pytest.mark.parametrize(
+    "resource_id, changes, reason",
+    [
+        (uuid.UUID(int=7), None, "provenance_missing"),  # a harvested document without its version record
+        (None, {}, "provenance_mismatch"),  # a version record on a document that is not harvested
+        (uuid.UUID(int=8), {}, "provenance_mismatch"),  # the record of another resource
+        (uuid.UUID(int=7), {"revision_id": 0}, "provenance_revision"),
+        (uuid.UUID(int=7), {"revision_id": "1234567"}, "provenance_revision"),
+        (uuid.UUID(int=7), {"revision_id": True}, "provenance_revision"),
+        (uuid.UUID(int=7), {"revision_id": 2**53}, "provenance_revision"),  # not exact in JavaScript
+        (uuid.UUID(int=7), {"canonical_url": None}, "url_unsafe"),
+        (uuid.UUID(int=7), {"revision_url": "javascript:alert(1)"}, "url_unsafe"),
+        (uuid.UUID(int=7), {"licence_url": "https://user:pw@host/"}, "url_unsafe"),
+        (uuid.UUID(int=7), {"attribution": None}, "provenance_attribution"),
+        (uuid.UUID(int=7), {"attribution": "  "}, "provenance_attribution"),
+        (uuid.UUID(int=7), {"attribution": "By someone\x1b[31m"}, "provenance_attribution"),
+        (uuid.UUID(int=7), {"attribution": "line\nbreak"}, "provenance_attribution"),
+        (uuid.UUID(int=7), {"attribution": "x" * 2001}, "provenance_attribution"),
+        (uuid.UUID(int=7), {"licence": ""}, "provenance_licence"),
+        (uuid.UUID(int=7), {"licence": "CC BY<script>"}, "provenance_licence"),
+        (uuid.UUID(int=7), {"licence": None}, "provenance_licence"),
+    ],
+)
+def test_missing_or_malformed_provenance_rejects_the_citation(resource_id, changes, reason):
+    version = None if changes is None else {**VERSION, **changes}
+    with pytest.raises(VerificationFailed) as raised:
+        public_provenance(resource_id, version)
+    assert raised.value.reason == reason
 
 
 def test_snippet_is_the_matching_database_passage():

@@ -21,7 +21,11 @@ A citation is accepted only if ALL hold, else the whole answer is rejected:
   not trivially short;
 - the public metadata derived from the records is safe: a title without
   control characters, an http(s) URL without credentials (or none), and a
-  locator of a known shape.
+  locator of a known shape;
+- harvested external material (documents.external_resource_id set) has the
+  provenance record of exactly the cited document version
+  (external_document_versions.document_id = the cited document, of the same
+  resource), with safe URLs, a revision id, an attribution and a licence.
 Topics must be topics of the requested course.
 
 Public fields come from the database records, never from the AI response:
@@ -29,7 +33,10 @@ title (documents.title), url (documents.url, external only), locator
 (chunks.locator: {"page": n} -> "Page n", the physical PDF page, since slide
 numbering is not known; {"slide": n} -> "Slide n" only when the indexer
 recorded real slide numbers; {"section": s} or {"heading": s} -> "Section s"),
-snippet (the matching passage of chunks.text).
+snippet (the matching passage of chunks.text), provenance (WP-5: the cited
+version's external_document_versions row - source_url, revision_id,
+revision_url, attribution, licence, licence_url - or null for class material
+and for external material that was not harvested; never filled in or guessed).
 
 Verification establishes provenance only: each quoted passage exists in a
 permitted, indexed source of this course. It does NOT establish that the
@@ -40,6 +47,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -60,6 +68,11 @@ SNIPPET_MAX_CHARS = 300
 MIN_QUOTE_CHARS = 20
 MAX_URL_CHARS = 2048
 MAX_SECTION_CHARS = 40
+MAX_ATTRIBUTION_CHARS = 2000
+MAX_SAFE_INTEGER = 2**53 - 1  # revision ids must be exact in JavaScript clients
+
+_LICENCE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9 .+-]{0,98}[A-Za-z0-9.+-])?")
+_VERSION_COLUMNS = ("resource_id", "revision_id", "canonical_url", "revision_url", "attribution", "licence", "licence_url")
 
 _PUBLIC_ORIGIN = {"class": "class", "external": "external", "web_cache": "web"}
 _WHITESPACE = re.compile(r"\s+")
@@ -112,6 +125,37 @@ def public_url(url: object) -> str | None:
     return url
 
 
+def public_provenance(resource_id: uuid.UUID | None, version: Mapping[str, object] | None) -> dict | None:
+    """Version-specific attribution of a cited external document, copied from its own version record.
+
+    `resource_id` is documents.external_resource_id of the cited document and
+    `version` its external_document_versions row (None when there is none).
+    Missing or malformed metadata of a harvested document rejects the answer.
+    """
+    if version is None:
+        if resource_id is None:
+            return None  # not harvested: no version record, so there is nothing to show (and nothing is invented)
+        raise VerificationFailed("provenance_missing")
+    if resource_id is None or version["resource_id"] != resource_id:
+        raise VerificationFailed("provenance_mismatch")
+    revision_id = version["revision_id"]
+    if type(revision_id) is not int or not 1 <= revision_id <= MAX_SAFE_INTEGER:
+        raise VerificationFailed("provenance_revision")
+    attribution = version["attribution"]
+    if (not isinstance(attribution, str) or not attribution.strip() or len(attribution) > MAX_ATTRIBUTION_CHARS
+            or has_forbidden_controls(attribution) or "\n" in attribution or "\t" in attribution):  # fmt: skip
+        raise VerificationFailed("provenance_attribution")
+    licence = version["licence"]
+    if not isinstance(licence, str) or not _LICENCE.fullmatch(licence):
+        raise VerificationFailed("provenance_licence")
+    urls = [public_url(version[key]) for key in ("canonical_url", "revision_url", "licence_url")]
+    if any(url is None for url in urls):
+        raise VerificationFailed("url_unsafe")
+    source_url, revision_url, licence_url = urls
+    return {"source_url": source_url, "revision_id": revision_id, "revision_url": revision_url,
+            "attribution": attribution.strip(), "licence": licence, "licence_url": licence_url}  # fmt: skip
+
+
 def public_title(title: object) -> str:
     if not isinstance(title, str) or not title.strip() or len(title) > 255 or has_forbidden_controls(title) or "\n" in title:
         raise VerificationFailed("title_unsafe")
@@ -158,9 +202,11 @@ def verify_answer(
         text(
             "SELECT c.id, c.document_id, c.course_id AS chunk_course, c.origin AS chunk_origin, c.text, c.locator, "
             "d.course_id AS doc_course, d.origin AS doc_origin, d.status, d.title, d.url, d.source_id, "
-            "s.enabled AS source_enabled "
-            "FROM chunks c JOIN documents d ON d.id = c.document_id "
-            "LEFT JOIN sources s ON s.id = d.source_id WHERE c.id = ANY(:ids)"
+            "d.external_resource_id, s.enabled AS source_enabled, v.document_id AS v_document_id, "
+            + ", ".join(f"v.{column} AS v_{column}" for column in _VERSION_COLUMNS)
+            + " FROM chunks c JOIN documents d ON d.id = c.document_id "
+            "LEFT JOIN sources s ON s.id = d.source_id "
+            "LEFT JOIN external_document_versions v ON v.document_id = d.id WHERE c.id = ANY(:ids)"
         ),
         {"ids": chunk_ids},
     ).all()
@@ -183,13 +229,15 @@ def verify_answer(
         if origin == "class":
             if row.chunk_course != course_id or row.doc_course != course_id:
                 raise VerificationFailed("course_mismatch")
-            url = None
+            url = provenance = None
         elif origin == "external":
             if row.source_id is None or row.source_enabled is not True:
                 raise VerificationFailed("source_not_enabled")
             if row.chunk_course != course_id or row.doc_course != course_id:
                 raise VerificationFailed("course_mismatch")  # NULL (shared) is refused until M6
             url = public_url(row.url)
+            version = None if row.v_document_id is None else {c: getattr(row, f"v_{c}") for c in _VERSION_COLUMNS}
+            provenance = public_provenance(row.external_resource_id, version)
         else:
             raise VerificationFailed("web_not_available")
         citations.append(
@@ -201,6 +249,7 @@ def verify_answer(
                 "locator": public_locator(row.locator),
                 "url": url,
                 "snippet": snippet_for(row.text, cited.quote),
+                "provenance": provenance,
             }
         )
 

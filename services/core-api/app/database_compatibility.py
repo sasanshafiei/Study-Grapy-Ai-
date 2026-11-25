@@ -5,7 +5,7 @@ from sqlalchemy.engine import Connection
 
 from .migration_safety import EXPECTED_SCHEMA
 
-REQUIRED_SCHEMA_REVISION = "0009"
+REQUIRED_SCHEMA_REVISION = "0010"
 
 
 class IncompatibleDatabase(RuntimeError):

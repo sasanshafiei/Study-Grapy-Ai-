@@ -377,3 +377,42 @@ def test_a_duplicate_stays_a_duplicate_while_the_referenced_content_is_held(scen
     assert run_harvest(scene.new_run(), scene.ctx()) == "succeeded"
     assert ("parse", 80) not in scene.connector.requests  # unchanged and still held: no content request
     assert _resource_state(scene, 8)["state"] == "duplicate"
+
+
+def _page7(scene, column):
+    return scene.world.scalar(
+        f"SELECT {column} FROM external_resources WHERE course_id = :c AND page_id = 7", c=scene.course
+    )
+
+
+def test_an_accepted_page_whose_new_revision_duplicates_another_is_not_fetched_again(scene):
+    """WP-5 / F10: the known duplicated revision is recorded, not re-fetched, and recovered once nobody holds it."""
+    second = " The second article also explains how equilibrium constants are measured."
+    scene.connector.search_results[QUERY] = [SearchHit(7, QUERY), SearchHit(8, QUERY)]
+    scene.connector.pages[8] = (info(8, 80, QUERY), fetched(8, 80, QUERY, extra=second))
+    assert run_harvest(scene.new_run(), scene.ctx()) == "succeeded"
+    for page in (7, 8):
+        (version,) = versions_of(scene.world, page, scene.course)
+        index_now(scene.factory, scene.world, version["id"])
+    scene.connector.pages[7] = (info(7, 43, QUERY), fetched(7, 43, QUERY, extra=second))  # now page 8's text
+    _due_again(scene)
+    assert run_harvest(scene.new_run(), scene.ctx()) == "succeeded"
+    assert ("parse", 43) in scene.connector.requests
+    assert _page7(scene, "last_revision_id") == 43 and _page7(scene, "next_check_at > now()")
+    scene.connector.requests.clear()
+    _due_again(scene)
+    assert run_harvest(scene.new_run(), scene.ctx()) == "succeeded"
+    assert ("parse", 43) not in scene.connector.requests  # known revision, text still held by page 8
+    assert [v["status"] for v in versions_of(scene.world, 7, scene.course)] == ["indexed"]  # own text stays visible
+    # Page 8 is rewritten; once its new version is indexed nobody holds the text and page 7 recovers revision 43.
+    scene.connector.pages[8] = (info(8, 81, QUERY), fetched(8, 81, QUERY, extra=" Rewritten."))
+    _due_again(scene)
+    assert run_harvest(scene.new_run(), scene.ctx()) == "succeeded"
+    assert ("parse", 43) not in scene.connector.requests  # page 8's old version is still visible
+    _, rewritten = versions_of(scene.world, 8, scene.course)
+    index_now(scene.factory, scene.world, rewritten["id"])
+    scene.connector.requests.clear()
+    _due_again(scene)
+    assert run_harvest(scene.new_run(), scene.ctx()) == "succeeded"
+    assert ("parse", 43) in scene.connector.requests
+    assert [v["status"] for v in versions_of(scene.world, 7, scene.course)] == ["indexed", "pending"]

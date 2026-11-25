@@ -593,6 +593,11 @@ class ExternalResource(Base):
         CheckConstraint("page_id > 0", name="page_id"),
         CheckConstraint("content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'", name="content_sha256"),
         CheckConstraint("missing_checks >= 0 AND ((missing_checks = 0) = (missing_since IS NULL))", name="missing"),
+        CheckConstraint(
+            "duplicate_content_sha256 IS NULL OR (state = 'accepted' AND duplicate_content_sha256 ~ '^[0-9a-f]{64}$'"
+            " AND duplicate_content_sha256 IS DISTINCT FROM content_sha256)",
+            name="duplicate_content_sha256",
+        ),
         UniqueConstraint("course_id", "source_id", "page_id"),
         UniqueConstraint("id", "course_id", "source_id", name="external_resources_id_course_id_source_id_key"),
         ForeignKeyConstraint(
@@ -633,6 +638,10 @@ class ExternalResource(Base):
     next_check_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # Accepted resources only (revision 0010): the digest of the newest checked revision (last_revision_id) when
+    # its text duplicates content another accepted resource holds. content_sha256 stays the key of the visible
+    # version; the revision is reconsidered once nobody holds this digest (app/harvest/persist.py).
+    duplicate_content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class ExternalDocumentVersion(Base):

@@ -92,7 +92,8 @@ from" requirement lands:
       "title": "Lecture 04 - Stoichiometry.pdf",
       "locator": "Slide 12",
       "url": null,
-      "snippet": "The limiting reactant limits the amount of product..."
+      "snippet": "The limiting reactant limits the amount of product...",
+      "provenance": null
     },
     {
       "marker": 2,
@@ -101,7 +102,8 @@ from" requirement lands:
       "title": "OpenStax Chemistry 2e, 4.4 Reaction Yields",
       "locator": "Section 4.4",
       "url": "https://openstax.org/books/chemistry-2e/pages/4-4",
-      "snippet": "Work out how much product each reactant could make..."
+      "snippet": "Work out how much product each reactant could make...",
+      "provenance": null
     }
   ],
   "grounded": true,
@@ -120,6 +122,23 @@ Points to hold to:
 - **`origin` is one of `class`, `external`, `web`** and decides the colour.
 - **`locator` is a human-readable string** — "Slide 12", "Section 4.4", "Page 6".
   The web app prints it as-is, so format it on the server.
+- **`provenance`** (WP-5, additive) is `null` for class material and for external
+  material that was not harvested. For harvested external material it is the stored
+  record of exactly the cited revision. Show `attribution` with links to `revision_url`
+  and `licence_url` (the licence requires it). Never build attribution from other fields
+  or from the answer text. `revision_id` is an integer. Treat every URL as untrusted text
+  and render it only as an `http(s)` link (core-api already refuses any other scheme).
+
+  ```json
+  "provenance": {
+    "source_url": "https://en.wikipedia.org/wiki/Chemical_equilibrium",
+    "revision_id": 1234567,
+    "revision_url": "https://en.wikipedia.org/w/index.php?oldid=1234567",
+    "attribution": "\"Chemical equilibrium\", Wikipedia (en), by Wikipedia contributors (...), revision 1234567, ...",
+    "licence": "CC BY-SA 4.0",
+    "licence_url": "https://creativecommons.org/licenses/by-sa/4.0/"
+  }
+  ```
 - **`grounded: false`** means the sources do not support an answer. The web app
   then shows `text` as a warning instead of as an answer, so send a sentence
   explaining that, not a guess.
@@ -134,7 +153,7 @@ the response has to include both numbers:
   "correct": false,
   "correct_answer": "It shifts toward reactants and K decreases",
   "explanation": "Heat is released in the forward direction...",
-  "citation": { ...one citation, same shape as above... },
+  "citation": { ...one citation, same shape as above, class material only, without provenance... },
   "mastery_before": 0.38,
   "mastery": {
     "topic_id": "t_equil",
