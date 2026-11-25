@@ -188,6 +188,11 @@ def test_no_endpoint_exposes_parsed_content():
         "/api/v1/courses/{course_id}/exams/{exam_id}/history": ["get"],
         "/api/v1/courses/{course_id}/exams/{exam_id}/export": ["get"],
         "/api/v1/courses/{course_id}/exams/{exam_id}/preview-file": ["get"],
+        # WP-4: read-only admin observability (active admins only). Ids, statuses, counts, timestamps and
+        # error codes; no endpoint reads document_sections or chunks.
+        "/api/v1/admin/overview": ["get"],
+        "/api/v1/admin/sources": ["get"],
+        "/api/v1/admin/jobs": ["get"],
         "/health": ["get"],
         "/health/db": ["get"],
         "/health/ready": ["get"],

@@ -63,6 +63,680 @@
         "title": "ActivitySummary",
         "type": "object"
       },
+      "AdminAttempts": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "max_attempts for parse/index jobs; max_claims (slices) for harvest runs.",
+            "minimum": 0.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "used": {
+            "minimum": 0.0,
+            "title": "Used",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "used",
+          "limit"
+        ],
+        "title": "AdminAttempts",
+        "type": "object"
+      },
+      "AdminDocumentCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "failed": {
+            "minimum": 0.0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "indexed": {
+            "minimum": 0.0,
+            "title": "Indexed",
+            "type": "integer"
+          },
+          "pending": {
+            "minimum": 0.0,
+            "title": "Pending",
+            "type": "integer"
+          },
+          "stale": {
+            "minimum": 0.0,
+            "title": "Stale",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pending",
+          "indexed",
+          "failed",
+          "stale"
+        ],
+        "title": "AdminDocumentCounts",
+        "type": "object"
+      },
+      "AdminFeatures": {
+        "additionalProperties": false,
+        "properties": {
+          "analytics_enabled": {
+            "title": "Analytics Enabled",
+            "type": "boolean"
+          },
+          "chat_enabled": {
+            "title": "Chat Enabled",
+            "type": "boolean"
+          },
+          "dashboard_enabled": {
+            "title": "Dashboard Enabled",
+            "type": "boolean"
+          },
+          "dispatch_on_upload": {
+            "title": "Dispatch On Upload",
+            "type": "boolean"
+          },
+          "exam_export_enabled": {
+            "title": "Exam Export Enabled",
+            "type": "boolean"
+          },
+          "exams_enabled": {
+            "title": "Exams Enabled",
+            "type": "boolean"
+          },
+          "harvest_enabled": {
+            "title": "Harvest Enabled",
+            "type": "boolean"
+          },
+          "indexing_enabled": {
+            "title": "Indexing Enabled",
+            "type": "boolean"
+          },
+          "mastery_delivery_enabled": {
+            "title": "Mastery Delivery Enabled",
+            "type": "boolean"
+          },
+          "quiz_enabled": {
+            "title": "Quiz Enabled",
+            "type": "boolean"
+          },
+          "study_events_enabled": {
+            "title": "Study Events Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dispatch_on_upload",
+          "indexing_enabled",
+          "chat_enabled",
+          "harvest_enabled",
+          "quiz_enabled",
+          "dashboard_enabled",
+          "analytics_enabled",
+          "study_events_enabled",
+          "mastery_delivery_enabled",
+          "exams_enabled",
+          "exam_export_enabled"
+        ],
+        "title": "AdminFeatures",
+        "type": "object"
+      },
+      "AdminHarvestCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "cancelled": {
+            "minimum": 0.0,
+            "title": "Cancelled",
+            "type": "integer"
+          },
+          "failed": {
+            "minimum": 0.0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "queued": {
+            "minimum": 0.0,
+            "title": "Queued",
+            "type": "integer"
+          },
+          "running": {
+            "minimum": 0.0,
+            "title": "Running",
+            "type": "integer"
+          },
+          "succeeded": {
+            "minimum": 0.0,
+            "title": "Succeeded",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ],
+        "title": "AdminHarvestCounts",
+        "type": "object"
+      },
+      "AdminIngestionCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "failed": {
+            "minimum": 0.0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "queued": {
+            "minimum": 0.0,
+            "title": "Queued",
+            "type": "integer"
+          },
+          "running": {
+            "minimum": 0.0,
+            "title": "Running",
+            "type": "integer"
+          },
+          "succeeded": {
+            "minimum": 0.0,
+            "title": "Succeeded",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed"
+        ],
+        "title": "AdminIngestionCounts",
+        "type": "object"
+      },
+      "AdminJob": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "$ref": "#/components/schemas/AdminAttempts"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminJobError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "parse",
+              "index",
+              "harvest"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/AdminSubject"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "created_at",
+          "started_at",
+          "finished_at",
+          "attempts",
+          "subject",
+          "error"
+        ],
+        "title": "AdminJob",
+        "type": "object"
+      },
+      "AdminJobCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "harvest": {
+            "$ref": "#/components/schemas/AdminHarvestCounts"
+          },
+          "index": {
+            "$ref": "#/components/schemas/AdminIngestionCounts"
+          },
+          "parse": {
+            "$ref": "#/components/schemas/AdminIngestionCounts"
+          }
+        },
+        "required": [
+          "parse",
+          "index",
+          "harvest"
+        ],
+        "title": "AdminJobCounts",
+        "type": "object"
+      },
+      "AdminJobError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reviewed public text for document jobs; null for harvest runs.",
+            "title": "Message"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "AdminJobError",
+        "type": "object"
+      },
+      "AdminJobList": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminJob"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "AdminJobList",
+        "type": "object"
+      },
+      "AdminLastRun": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "created_at",
+          "finished_at",
+          "error_code"
+        ],
+        "title": "AdminLastRun",
+        "type": "object"
+      },
+      "AdminOverview": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "title": "As Of",
+            "type": "string"
+          },
+          "documents": {
+            "$ref": "#/components/schemas/AdminDocumentCounts"
+          },
+          "features": {
+            "$ref": "#/components/schemas/AdminFeatures"
+          },
+          "jobs": {
+            "$ref": "#/components/schemas/AdminJobCounts"
+          },
+          "sources": {
+            "$ref": "#/components/schemas/AdminSourceTotals"
+          }
+        },
+        "required": [
+          "as_of",
+          "features",
+          "sources",
+          "documents",
+          "jobs"
+        ],
+        "title": "AdminOverview",
+        "type": "object"
+      },
+      "AdminSource": {
+        "additionalProperties": false,
+        "properties": {
+          "courses": {
+            "description": "Courses with a harvest target for this source.",
+            "minimum": 0.0,
+            "title": "Courses",
+            "type": "integer"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "documents": {
+            "$ref": "#/components/schemas/AdminDocumentCounts"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminLastRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "licence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Licence"
+          },
+          "licence_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Licence Url"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "provider",
+          "language",
+          "domain",
+          "licence",
+          "licence_url",
+          "enabled",
+          "created_at",
+          "courses",
+          "documents",
+          "last_run"
+        ],
+        "title": "AdminSource",
+        "type": "object"
+      },
+      "AdminSourceList": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminSource"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "AdminSourceList",
+        "type": "object"
+      },
+      "AdminSourceTotals": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "minimum": 0.0,
+            "title": "Enabled",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "enabled"
+        ],
+        "title": "AdminSourceTotals",
+        "type": "object"
+      },
+      "AdminSubject": {
+        "additionalProperties": false,
+        "properties": {
+          "course_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Course Id"
+          },
+          "document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Id"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dirty",
+                  "refresh",
+                  "manual"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          }
+        },
+        "required": [
+          "course_id",
+          "document_id",
+          "source_id",
+          "trigger"
+        ],
+        "title": "AdminSubject",
+        "type": "object"
+      },
       "AnalyticsResponse": {
         "additionalProperties": false,
         "properties": {
@@ -4797,6 +5471,350 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/admin/jobs": {
+      "get": {
+        "operationId": "admin_jobs_api_v1_admin_jobs_get",
+        "parameters": [
+          {
+            "description": "Job kind.",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "enum": [
+                "parse",
+                "index",
+                "harvest"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Job status.",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "enum": [
+                "queued",
+                "running",
+                "succeeded",
+                "failed",
+                "cancelled"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "next_cursor of the previous page, with the same filters.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminJobList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge.",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "Bearer"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not an active administrator."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorBody"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Invalid application input or malformed path parameter."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Document parse/index jobs and harvest runs (admin), newest first, with safe error summaries",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/overview": {
+      "get": {
+        "operationId": "admin_overview_api_v1_admin_overview_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminOverview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge.",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "Bearer"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not an active administrator."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorBody"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Invalid application input or malformed path parameter."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Source, document and job counts and the feature switches (admin; no parameters)",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/sources": {
+      "get": {
+        "operationId": "admin_sources_api_v1_admin_sources_get",
+        "parameters": [
+          {
+            "description": "Only enabled or only disabled sources.",
+            "in": "query",
+            "name": "enabled",
+            "required": false,
+            "schema": {
+              "enum": [
+                "true",
+                "false"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "next_cursor of the previous page, with the same filters.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSourceList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge.",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "Bearer"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not an active administrator."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorBody"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Invalid application input or malformed path parameter."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "External sources with harvest targets, document counts and the latest run (admin), newest first",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/courses": {
       "get": {
         "operationId": "list_courses_api_v1_courses_get",
