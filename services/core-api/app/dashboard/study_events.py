@@ -278,13 +278,23 @@ def authorize(factory: sessionmaker[Session], user: CurrentUser, course_id: uuid
 
 
 def cleanup(session_factory: sessionmaker[Session], settings: Settings) -> int:
-    """Delete events past their retention, a bounded batch per tick (runs whatever STUDY_EVENTS_ENABLED says)."""
+    """Delete events past their retention, a bounded batch per tick (runs whatever STUDY_EVENTS_ENABLED says).
+
+    The victims are selected once (MATERIALIZED CTE): a locking LIMIT subquery inside `id IN (...)`
+    can be rescanned by the planner and then delete more than the batch, or lose rows another
+    worker has locked (tests/test_maintenance_batches.py).
+    """
     with session_factory() as session:
         deleted = session.execute(
             text(
-                "DELETE FROM study_events WHERE id IN (SELECT id FROM study_events "
-                "WHERE received_at < now() - :days * interval '1 day' ORDER BY received_at, id LIMIT :limit "
-                "FOR UPDATE SKIP LOCKED)"
+                """
+                WITH victims AS MATERIALIZED (
+                    SELECT id FROM study_events
+                    WHERE received_at < now() - :days * interval '1 day'
+                    ORDER BY received_at, id LIMIT :limit FOR UPDATE SKIP LOCKED
+                )
+                DELETE FROM study_events AS e USING victims WHERE e.id = victims.id
+                """
             ),
             {"days": settings.study_events_retention_days, "limit": settings.study_events_cleanup_batch},
         ).rowcount
