@@ -40,7 +40,7 @@ async def wire_error(request, exc):
 
 @app.get("/health", include_in_schema=False)
 def health():
-    return {"status": "ok", "service": "ai-service", "mock": True}
+    return {"status": "ok", "service": "ai-service", "mock": True, "real_profiles": REAL_PROFILES}
 
 
 def authorize(request, protocol):
@@ -158,6 +158,16 @@ def register(profile, action, method):
     app.add_api_route(path, handle, methods=[method.upper()], name=op["operationId"])
 
 
+REAL_PROFILES = []
+if os.environ.get("MASTERY_PROVIDER", "fixture").strip().lower() == "real":
+    # AI-2's real provider replaces only the mastery fixture; imported lazily so fixture mode is unchanged.
+    from .mastery import routes as mastery_routes
+
+    mastery_routes.register(app, SPEC, validator, authorize, read_payload, WireError)
+    REAL_PROFILES.append("mastery")
+
 for name, action in ACTIONS.items():
+    if name in REAL_PROFILES:
+        continue
     register(name, "capabilities", "get")
     register(name, action, "post")
