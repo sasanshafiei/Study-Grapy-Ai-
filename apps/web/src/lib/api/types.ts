@@ -66,6 +66,8 @@ export interface ChatMessage {
   grounded: boolean;
   usedWeb: boolean;
   scope: Scope;
+  /** Topics this answer covered, for offering practice on them. */
+  topicIds: string[];
   createdAt: string;
 }
 
@@ -362,6 +364,11 @@ export interface Api {
     question: string,
     scope: Scope,
     onText: (textSoFar: string) => void,
+    /**
+     * Restrict the answer to these documents. Omit for every indexed document.
+     * Not yet in core-api: see contracts/core-api.web.md, "Source selection".
+     */
+    documentIds?: string[],
   ): Promise<ChatMessage>;
   generateQuiz(courseId: string, request: QuizRequest): Promise<Question[]>;
   submitAttempt(courseId: string, input: AttemptInput): Promise<AttemptResult>;

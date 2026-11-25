@@ -254,7 +254,9 @@ export function AppShell({ role, children }: { role: Role; children: ReactNode }
         ) : null}
       </header>
 
-      <main className="mx-auto max-w-6xl px-5 py-8 sm:px-8 lg:px-10 lg:py-10">
+      {/* Wide enough for the three-pane Ask workspace; narrower pages set their
+          own measure so long prose never runs the full width. */}
+      <main className="mx-auto max-w-[88rem] px-5 py-8 sm:px-8 lg:px-10 lg:py-10">
         <CourseContext.Provider value={course}>
           {needsCourse && !course ? (
             courses.error ? (

@@ -136,11 +136,12 @@ export const liveApi: Api = {
    *   event: done    data: {the full ChatMessage, snake_case}
    *   event: error   data: {"message": "..."}
    */
-  async ask(courseId, question, scope, onText) {
+  async ask(courseId, question, scope, onText, documentIds) {
     const response = await send(`/courses/${courseId}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: toServer({ question, scope }),
+      // documentIds is a proposed field; core-api ignores unknown keys today.
+      body: toServer({ question, scope, documentIds }),
     });
     if (!response.body) throw new ApiError("The server sent an empty answer.");
 

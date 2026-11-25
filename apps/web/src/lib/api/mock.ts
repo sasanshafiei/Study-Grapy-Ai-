@@ -336,7 +336,20 @@ function findAnswer(question: string): CannedAnswer | null {
   return best;
 }
 
-function composeAnswer(question: string, scope: Scope) {
+/** The document a canned source belongs to, matched on title. */
+function documentIdFor(key: SourceKey): string | null {
+  const title = SOURCES_REF[key].title;
+  return state().documents.find((d) => d.title === title)?.id ?? null;
+}
+
+/** False when the student has unticked the document this source lives in. */
+function allowed(key: SourceKey, selected: Set<string> | null): boolean {
+  if (selected === null) return true;
+  const id = documentIdFor(key);
+  return id === null || selected.has(id);
+}
+
+function composeAnswer(question: string, scope: Scope, selected: Set<string> | null) {
   const match = findAnswer(question);
   if (!match) return null;
 
@@ -349,6 +362,10 @@ function composeAnswer(question: string, scope: Scope) {
     if (origin === "external" && scope === "class_only") {
       key = part.classSource ?? null;
     }
+    // A web result is governed by the toggle, not by the document picker.
+    if (key !== null && SOURCES_REF[key].origin !== "web" && !allowed(key, selected)) {
+      key = null;
+    }
     if (key === null) continue;
 
     let marker = citations.find((c) => c.chunkId === `chunk-${key}`)?.marker;
@@ -359,7 +376,7 @@ function composeAnswer(question: string, scope: Scope) {
     sentences.push(`${part.text} [${marker}]`);
   }
   if (sentences.length === 0) return null;
-  return { text: sentences.join(" "), citations };
+  return { text: sentences.join(" "), citations, topicId: match.topicId };
 }
 
 // --- Professor --------------------------------------------------------------
@@ -558,9 +575,13 @@ export const mockApi: Api = {
     return buildDashboard();
   },
 
-  async ask(_courseId, question, scope, onText) {
+  async ask(_courseId, question, scope, onText, documentIds) {
     await wait(700);
-    const composed = composeAnswer(question, scope);
+    const composed = composeAnswer(
+      question,
+      scope,
+      documentIds === undefined ? null : new Set(documentIds),
+    );
     const text =
       composed?.text ??
       (scope === "class_plus_web"
@@ -584,6 +605,7 @@ export const mockApi: Api = {
       grounded: composed !== null,
       usedWeb: citations.some((c) => c.origin === "web"),
       scope,
+      topicIds: composed ? [composed.topicId] : [],
       createdAt: new Date().toISOString(),
     } satisfies ChatMessage;
   },

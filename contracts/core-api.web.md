@@ -171,6 +171,28 @@ useful, and explainability is one of our own success criteria:
 `type` is one of `review_topic`, `practice_quiz`, `class_material`,
 `external_resource`, and decides where the button goes.
 
+## Source selection (a request to CE-1)
+
+The Ask screen lets a student tick which documents an answer may draw on, the
+way NotebookLM does. The web app already sends it:
+
+```json
+{ "question": "...", "scope": "class_plus_external",
+  "document_ids": ["doc-l07", "doc-os-134"] }
+```
+
+`document_ids` is **optional**. Omitted, it means every indexed document, which
+is today's behaviour — so ignoring the field changes nothing and nothing breaks
+while it is unimplemented.
+
+When it is implemented, retrieval should be restricted to chunks belonging to
+those documents. Scope still applies on top: `class_plus_web` may add live
+results, which have no document id and are therefore never filtered by it.
+
+Until CE-1 supports it the filtering is client-side only, which means an answer
+can still be built from a source the student unticked. Worth closing before the
+demo, since "I chose my sources" is a claim the UI makes visibly.
+
 ## Two rules the UI assumes and the server must enforce
 
 1. **A draft exam question never reaches a student.** Questions stored with
