@@ -512,14 +512,23 @@ def mark_failed_by_key(
 
 
 def recover_expired(factory: sessionmaker[Session], batch: int = 100) -> list[uuid.UUID]:
-    """Maintenance: generating sessions whose lease expired (database time) become failed `lease_expired`."""
+    """Maintenance: generating sessions whose lease expired (database time) become failed `lease_expired`.
+
+    A bounded batch, oldest lease first (`id` breaks ties), selected once (MATERIALIZED CTE) so the
+    planner cannot rescan the locking subquery and exceed the batch or skip it under contention.
+    """
     with short_tx(factory) as session:
         ids = session.execute(
             text(
-                "UPDATE quiz_sessions SET status = 'failed', failure_code = 'lease_expired', attempt_token = NULL, "
-                "lease_expires_at = NULL, completed_at = now(), updated_at = now() WHERE id IN ("
-                "SELECT id FROM quiz_sessions WHERE status = 'generating' AND lease_expires_at <= now() "
-                "ORDER BY lease_expires_at LIMIT :n FOR UPDATE SKIP LOCKED) RETURNING id"
+                """
+                WITH expired AS MATERIALIZED (
+                    SELECT id FROM quiz_sessions WHERE status = 'generating' AND lease_expires_at <= now()
+                    ORDER BY lease_expires_at, id LIMIT :n FOR UPDATE SKIP LOCKED
+                )
+                UPDATE quiz_sessions AS q SET status = 'failed', failure_code = 'lease_expired',
+                    attempt_token = NULL, lease_expires_at = NULL, completed_at = now(), updated_at = now()
+                FROM expired WHERE q.id = expired.id RETURNING q.id
+                """
             ),
             {"n": batch},
         ).scalars().all()

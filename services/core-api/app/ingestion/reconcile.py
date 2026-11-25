@@ -135,7 +135,8 @@ def _report_orphans(
     if not candidates:
         return
     with session_factory() as session:
-        unreferenced = [key for key in candidates if key not in _referenced(session, candidates)]
+        referenced = _referenced(session, candidates)  # one lookup for the whole batch
+    unreferenced = [key for key in candidates if key not in referenced]
     settled = [key for key in unreferenced if not storage.stored_file_in_use(key)]
     if not settled:
         return
