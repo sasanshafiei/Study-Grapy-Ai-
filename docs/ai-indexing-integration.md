@@ -106,6 +106,11 @@ A section-based request differs only in the document object and the section loca
  "content_digest": "…", "idempotency_key": "…"}
 ```
 
+OpenStax documents (WP-6) have `"kind": "textbook"`, `"licence": "CC BY-NC-SA 4.0"` and an attribution with
+`"provider": "openstax"`, `"page_id": 68664` (the digits of OpenStax module id `m68664`), `"revision_id": null`
+and `"revision_key"`: the git blob SHA-1 of the module file. Wikipedia attributions are unchanged (no
+`revision_key` key, so their bytes, digests and idempotency keys are as before).
+
 Locators: level 0 is the lead (anchor and heading `null`), levels 2..6 carry the
 provider's section anchor and heading. There are no page numbers. The response is the
 §4 response, unchanged. **AI-side obligations before advertising `"section"`:** persist

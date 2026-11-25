@@ -349,11 +349,12 @@ def index_context(settings: Settings, celery_app, environ: Mapping[str, str] = o
 
 
 def harvest_context(settings: Settings, celery_app, environ: Mapping[str, str] = os.environ):
-    """The harvest worker's per-process context: verified sessions and the Wikipedia connector factory.
+    """The harvest worker's per-process context: verified sessions and the Wikipedia/OpenStax connector factories.
 
     The storage object of the shared context is never used by harvesting.
     """
     from ..harvest.executor import HarvestContext
+    from ..harvest.openstax import OpenStaxConnector
     from ..harvest.transport import ProviderTransport
     from ..harvest.wikipedia import WikipediaConnector
 
@@ -361,16 +362,23 @@ def harvest_context(settings: Settings, celery_app, environ: Mapping[str, str] =
     if _state["harvest_context"] is None:
         transports: list[ProviderTransport] = []
 
-        def connector(language: str) -> WikipediaConnector:
+        def transport() -> ProviderTransport:
             # Built on first use (after the HARVEST_ENABLED and gate checks), with the
             # validated User-Agent; never at worker start-up.
             if not transports:
                 transports.append(ProviderTransport(settings.harvest_user_agent or ""))
-            return WikipediaConnector(transports[0], settings, language)
+            return transports[0]
+
+        def connector(language: str) -> WikipediaConnector:
+            return WikipediaConnector(transport(), settings, language)
+
+        def openstax_connector(book: str | None) -> OpenStaxConnector:
+            return OpenStaxConnector(transport(), settings, book)
 
         _state["harvest_context"] = HarvestContext(
-            session_factory=_state["context"].session_factory, settings=settings, connector_factory=connector
-        )
+            session_factory=_state["context"].session_factory, settings=settings, connector_factory=connector,
+            openstax_factory=openstax_connector,
+        )  # fmt: skip
     return _state["harvest_context"]
 
 

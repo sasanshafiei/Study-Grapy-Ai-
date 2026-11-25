@@ -149,14 +149,20 @@ class Source(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     # --- added by revision 0005 (M6 harvesting; NULL for every legacy source) ---
     # A provider-managed source: created disabled by the operator CLI, never seeded.
-    provider: Mapped[str | None] = mapped_column(String(30), nullable=True)  # wikipedia
+    provider: Mapped[str | None] = mapped_column(String(30), nullable=True)  # wikipedia | openstax
     language: Mapped[str | None] = mapped_column(String(10), nullable=True)
     licence_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # --- added by revision 0011 (WP-6): the allowlisted OpenStax book of an openstax source (else NULL).
+    # A BEFORE INSERT trigger stores every new openstax row disabled; only enable-source activates it.
+    provider_book: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     __table_args__ = (
         CheckConstraint(
-            "provider IS NULL OR (provider = 'wikipedia' AND language IS NOT NULL AND language ~ '^[a-z]{2,3}$'"
-            " AND licence_url IS NOT NULL)",
+            "(provider IS NULL AND provider_book IS NULL)"
+            " OR (provider = 'wikipedia' AND language IS NOT NULL AND language ~ '^[a-z]{2,3}$'"
+            " AND licence_url IS NOT NULL AND provider_book IS NULL)"
+            " OR (provider = 'openstax' AND language IS NOT NULL AND language = 'en' AND licence_url IS NOT NULL"
+            " AND provider_book IS NOT NULL AND provider_book ~ '^[a-z0-9]+(-[a-z0-9]+)*$')",
             name="provider",
         ),
         Index(None, "provider", "language", unique=True, postgresql_where=text("provider IS NOT NULL")),
@@ -592,6 +598,10 @@ class ExternalResource(Base):
         CheckConstraint("state IN ('accepted', 'duplicate', 'missing')", name="state"),
         CheckConstraint("page_id > 0", name="page_id"),
         CheckConstraint("content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'", name="content_sha256"),
+        CheckConstraint(
+            "last_revision_key IS NULL OR (last_revision_key ~ '^[0-9a-f]{40}$' AND last_revision_id IS NULL)",
+            name="last_revision_key",
+        ),
         CheckConstraint("missing_checks >= 0 AND ((missing_checks = 0) = (missing_since IS NULL))", name="missing"),
         CheckConstraint(
             "duplicate_content_sha256 IS NULL OR (state = 'accepted' AND duplicate_content_sha256 ~ '^[0-9a-f]{64}$'"
@@ -642,6 +652,9 @@ class ExternalResource(Base):
     # its text duplicates content another accepted resource holds. content_sha256 stays the key of the visible
     # version; the revision is reconsidered once nobody holds this digest (app/harvest/persist.py).
     duplicate_content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Revision 0011 (WP-6): a provider's non-numeric version identity (OpenStax: git blob SHA-1 of the module
+    # file), set instead of last_revision_id; never both.
+    last_revision_key: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class ExternalDocumentVersion(Base):
@@ -649,7 +662,11 @@ class ExternalDocumentVersion(Base):
 
     __tablename__ = "external_document_versions"
     __table_args__ = (
-        CheckConstraint("version >= 1 AND page_id > 0 AND revision_id > 0", name="identity"),
+        CheckConstraint(
+            "version >= 1 AND page_id > 0 AND ((revision_id IS NOT NULL AND revision_id > 0 AND revision_key IS NULL)"
+            " OR (revision_id IS NULL AND revision_key IS NOT NULL AND revision_key ~ '^[0-9a-f]{40}$'))",
+            name="identity",
+        ),
         CheckConstraint("content_sha256 ~ '^[0-9a-f]{64}$'", name="content_sha256"),
         CheckConstraint(
             "(stale_reason IS NULL AND staled_at IS NULL AND stale_evidence IS NULL)"
@@ -667,7 +684,7 @@ class ExternalDocumentVersion(Base):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     page_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    revision_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    revision_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # Wikipedia revision id
     revision_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     canonical_url: Mapped[str] = mapped_column(Text, nullable=False)
     revision_url: Mapped[str] = mapped_column(Text, nullable=False)
@@ -684,6 +701,9 @@ class ExternalDocumentVersion(Base):
     stale_evidence: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     staled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # Revision 0011 (WP-6): OpenStax's version identity (git blob SHA-1 of the module file), set instead of
+    # revision_id; exactly one of the two is set.
+    revision_key: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 # --- The one index --------------------------------------------------------

@@ -46,6 +46,14 @@ Outcomes of a slice:
   refusal): run failed.
 - a candidate that fails a quality gate, or whose responses are ambiguous
   (revision mismatch, missing revision): skipped and counted; never stale.
+
+OpenStax sources (WP-6) run a different slice body (_execute_openstax) under
+the same claim, request checks, budget, persistence and outcomes: pin one
+snapshot of the allowlisted book (branch head, tree, collection: three
+requests, the licence and book identity verified on the collection of that
+very snapshot), refresh known modules against it (no request for an
+unchanged module), then take new modules in book order. There is no search
+and no query text: the approved unit is the textbook itself.
 """
 
 from __future__ import annotations
@@ -55,6 +63,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
@@ -62,7 +71,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..config import Settings
-from . import budget, persist, queries, runs
+from . import budget, openstax, persist, queries, runs
+from .openstax import OpenStaxConnector
 from .persist import MissingStatus, Outcome
 from .runs import RunClaim
 from .wikipedia import CandidateRefused, ProviderError, ProviderThrottled, WikipediaConnector, lexically_relevant
@@ -79,6 +89,8 @@ class HarvestContext:
     connector_factory: Callable[[str], WikipediaConnector]
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
+    # WP-6: builds the OpenStax connector for a source's allowlisted book (refuses any other book).
+    openstax_factory: Callable[[str | None], OpenStaxConnector] | None = None
 
 
 class _Yield(Exception):
@@ -108,7 +120,7 @@ class _WorkDone(Exception):
 class _Slice:
     run: RunClaim
     ctx: HarvestContext
-    connector: WikipediaConnector
+    connector: WikipediaConnector | OpenStaxConnector | None
     started: float
     requests: int = 0
     tallies: dict = field(default_factory=dict)
@@ -189,7 +201,7 @@ def run_harvest(run_id: uuid.UUID, ctx: HarvestContext) -> str:
         with ctx.session_factory() as session:
             peek = session.execute(
                 text(
-                    "SELECT r.course_id, r.source_id, s.language FROM harvest_runs r "
+                    "SELECT r.course_id, r.source_id, s.language, s.provider, s.provider_book FROM harvest_runs r "
                     "JOIN sources s ON s.id = r.source_id WHERE r.id = :id"
                 ),
                 {"id": run_id},
@@ -212,9 +224,17 @@ def run_harvest(run_id: uuid.UUID, ctx: HarvestContext) -> str:
     if run is None:
         return "not_claimed"
     log.info("harvest_claimed run_id=%s claim=%d failures=%d", run_id, run.claim_count, run.failure_count)
-    work = _Slice(run=run, ctx=ctx, connector=ctx.connector_factory(peek.language), started=ctx.clock())
+    openstax_run = peek.provider == openstax.PROVIDER
+    connector = None if openstax_run else ctx.connector_factory(peek.language)
+    work = _Slice(run=run, ctx=ctx, connector=connector, started=ctx.clock())
     try:
-        _execute(work)
+        if openstax_run:
+            if ctx.openstax_factory is None:
+                raise ProviderError("provider_unavailable", "this worker has no OpenStax connector", retryable=False)
+            work.connector = ctx.openstax_factory(peek.provider_book)  # refuses a book that is not allowlisted
+            _execute_openstax(work)
+        else:
+            _execute(work)
     except _Yield as exc:
         return runs.yield_run(ctx.session_factory, run, s, exc.delay, exc.reason)
     except _Stop as exc:
@@ -443,3 +463,168 @@ def _candidate(work: _Slice, query, page) -> None:
     _persisted(work, outcome)
     if outcome is Outcome.QUOTA:
         work.progress["quota_reached"] = True
+
+
+# --- OpenStax (WP-6) ---------------------------------------------------------------------------------
+
+
+def _execute_openstax(work: _Slice) -> None:
+    progress = work.progress
+    progress.setdefault("phase", "snapshot")
+    try:
+        if progress["phase"] == "snapshot":
+            _openstax_snapshot(work)
+            progress["phase"] = "refresh"
+        if progress["phase"] == "refresh":
+            _openstax_refresh(work)
+            progress["phase"] = "catalogue"
+            progress.pop("refresh_cursor", None)
+        if progress["phase"] == "catalogue":
+            _openstax_catalogue(work)
+            progress["phase"] = "done"
+    except _WorkDone:
+        progress["phase"] = "done"
+        progress["limit_reached"] = True
+
+
+def _openstax_snapshot(work: _Slice) -> None:
+    """Pin the book for this run: branch head, its tree, then the collection of that tree (one unit each).
+
+    The collection request verifies the licence and the book identity of exactly this snapshot (a mismatch
+    fails the run, non-retryable) before any module is fetched. Every later request of the run names git
+    objects of this snapshot only, so one run never mixes two versions of the book.
+    """
+    progress = work.progress
+    connector: OpenStaxConnector = work.connector
+    if "commit" not in progress:
+        work.ensure_room(1)
+        work.before_request()
+        snapshot = connector.head()
+        progress.update(commit=snapshot.commit, tree=snapshot.tree,
+                        committed_at=snapshot.committed_at.isoformat() if snapshot.committed_at else None)  # fmt: skip
+        runs.save_progress(work.ctx.session_factory, work.run)
+    if "collection_blob" not in progress:
+        work.ensure_room(1)
+        work.before_request()
+        collection, blobs = connector.tree(progress["tree"])
+        progress.update(collection_blob=collection, blobs=blobs)
+        runs.save_progress(work.ctx.session_factory, work.run)
+    work.ensure_room(1)
+    work.before_request()
+    chapters = connector.collection(progress["collection_blob"])
+    blobs = progress.pop("blobs")
+    if any(module_id not in blobs for module_id, _ in chapters):
+        raise ProviderError("collection_inconsistent", "a listed module has no file in the snapshot", retryable=False)
+    progress["modules"] = [[module_id, blobs[module_id], chapter] for module_id, chapter in chapters]
+    progress["licence_ok"] = True
+    runs.save_progress(work.ctx.session_factory, work.run)
+
+
+def _openstax_fetch(work: _Slice, module_id: str, blob: str, chapter: str, *, candidate: bool = False):
+    """One unit: the module blob of this run's snapshot (one request), verified and normalized."""
+    work.ensure_room(1)
+    work.before_request()
+    if candidate:
+        work.count("candidates")
+    committed_at = work.progress.get("committed_at")
+    ref = openstax.ModuleRef(module_id, blob, chapter)
+    return work.connector.fetch_module(
+        ref, work.progress["commit"], datetime.fromisoformat(committed_at) if committed_at else None
+    )
+
+
+def _openstax_refresh(work: _Slice) -> None:
+    """Known modules due for a check, compared with the snapshot: unchanged ones cost no request."""
+    s = work.ctx.settings
+    run = work.run
+    factory = work.ctx.session_factory
+    modules = {module_id: (blob, chapter) for module_id, blob, chapter in work.progress["modules"]}
+    commit = work.progress["commit"]
+    gone_request = f"collection {work.connector.book.slug} at commit {commit}: module not in any chapter"
+    while True:
+        with factory() as session:
+            batch = session.execute(
+                text(
+                    "SELECT r.id, r.page_id, r.state, r.last_revision_key, r.missing_checks, "
+                    f"{persist.ORPHANED_DUPLICATE_SQL} AS orphaned FROM external_resources r "
+                    "WHERE r.course_id = :c AND r.source_id = :s AND r.next_check_at <= now() "
+                    "AND (CAST(:cursor AS uuid) IS NULL OR r.id > CAST(:cursor AS uuid)) ORDER BY r.id LIMIT :limit"
+                ),
+                {"c": run.course_id, "s": run.source_id, "cursor": work.progress.get("refresh_cursor"),
+                 "limit": s.harvest_refresh_batch_size},
+            ).all()  # fmt: skip
+            session.rollback()
+        if not batch:
+            return
+        for row in batch:
+            module_id = f"m{row.page_id}"
+            entry = modules.get(module_id)
+            if entry is None:
+                gone = openstax.GoneModule(page_id=row.page_id, commit=commit)
+                _persisted(work, persist.record_gone(factory, s, run, row.id, gone, provider=openstax.PROVIDER,
+                                                     request=gone_request))  # fmt: skip
+            elif (
+                entry[0] == row.last_revision_key
+                and row.state != "missing"
+                and row.missing_checks == 0
+                and not row.orphaned
+            ):
+                _persisted(work, persist.record_checked(factory, s, run, row.id, present=True, provider=openstax.PROVIDER))
+            else:
+                try:
+                    module = _openstax_fetch(work, module_id, *entry)
+                except CandidateRefused as exc:
+                    work.count("refused")
+                    log.info("harvest_refresh_refused run_id=%s module=%s code=%s", run.run_id, module_id, exc.code)
+                    _persisted(work, persist.record_checked(factory, s, run, row.id, present=False,
+                                                            provider=openstax.PROVIDER))  # fmt: skip
+                else:
+                    _persisted(work, persist.persist_revision(factory, s, run, None, module, None))
+            work.progress["refresh_cursor"] = str(row.id)
+        runs.save_progress(factory, run)
+
+
+def _openstax_catalogue(work: _Slice) -> None:
+    """Modules of the book not yet known to the course, in book order (cursor persisted with each decision)."""
+    s = work.ctx.settings
+    run = work.run
+    progress = work.progress
+    factory = work.ctx.session_factory
+    modules = progress["modules"]
+    while True:
+        if progress.get("quota_reached") or int(progress.get("accepted", 0)) + int(
+            progress.get("new_version", 0)
+        ) >= s.harvest_max_accepted_per_run:
+            raise _WorkDone()
+        if int(progress.get("candidates", 0)) >= s.harvest_max_candidates_per_run:
+            raise _WorkDone()
+        index = int(progress.get("catalogue_index", 0))
+        if index >= len(modules):
+            return
+        module_id, blob, chapter = modules[index]
+        with factory() as session:
+            known = session.execute(
+                text("SELECT 1 FROM external_resources WHERE course_id = :c AND source_id = :s AND page_id = :p"),
+                {"c": run.course_id, "s": run.source_id, "p": int(module_id[1:])},
+            ).first()
+            session.rollback()
+        if known is not None:  # refresh decides about it
+            progress["catalogue_index"] = index + 1
+            continue
+        try:
+            module = _openstax_fetch(work, module_id, blob, chapter, candidate=True)
+        except CandidateRefused as exc:
+            work.count("refused")
+            log.info("harvest_candidate_refused run_id=%s module=%s code=%s", run.run_id, module_id, exc.code)
+            progress["catalogue_index"] = index + 1
+            runs.save_progress(factory, run)
+            continue
+        progress["catalogue_index"] = index + 1  # written in the same transaction as the decision
+        outcome = persist.persist_revision(factory, s, run, None, module, None)
+        try:
+            _persisted(work, outcome)
+        except _Stop:
+            progress["catalogue_index"] = index  # nothing was written: this module is decided again
+            raise
+        if outcome is Outcome.QUOTA:
+            progress["quota_reached"] = True

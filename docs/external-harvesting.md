@@ -6,10 +6,11 @@ until an operator creates one, and a created source starts disabled. No provider
 traffic and no real AI service were used to build or test this milestone: every test
 runs offline against fixtures and a disposable PostgreSQL/Redis.
 
-Wikipedia (MediaWiki Action API) is the only implemented provider and the only one
-eligible for future activation. OpenStax and OpenAlex are **unavailable** (the schema
-CHECK on `sources.provider` admits only `wikipedia`). There is no live web search, no
-generic scraper, no paid API and no user-configurable domain.
+Implemented providers: Wikipedia (MediaWiki Action API) and, since WP-6, OpenStax for one
+allowlisted textbook (Chemistry 2e, read from OpenStax's official book repository; §12).
+OpenAlex is **unavailable** (the schema CHECK on `sources.provider` admits only `wikipedia`
+and `openstax`). There is no live web search, no generic scraper, no paid API and no
+user-configurable domain.
 
 ## 1. Overview
 
@@ -342,6 +343,7 @@ other workers and the API must stay without internet egress.
 
 ```
 init-source     --provider wikipedia --language en      # creates the source DISABLED + budget
+init-source     --provider openstax --book chemistry-2e  # allowlisted book only; DISABLED + GitHub budget (§12)
 enable-source   --source SOURCE_ID                       # explicit activation
 course-opt-in   --course COURSE_ID --source SOURCE_ID [--max-documents N]
 propose-queries --course COURSE_ID                       # read only: derived text + screen result
@@ -382,5 +384,89 @@ disable-source  --source SOURCE_ID                       # cancels runs; hides i
 - An unrepresentable `Retry-After` suspends the whole source until an operator re-enables it.
 - In-flight requests cannot be recalled (§3, "Unavoidable races").
 - Licence verification covers the site-wide declaration, not individual passages (§6).
-- One provider; OpenStax and OpenAlex need their own connectors, licence review and a
-  migration widening `sources_provider_check`.
+- OpenAlex needs its own connector, licence review and a migration widening `sources_provider_check`.
+- OpenStax limitations: §12.
+
+## 12. OpenStax connector (WP-6)
+
+Status: implemented behind the same flags, **not activated**; tested offline only (fixtures and a fake of
+GitHub's API, disposable PostgreSQL/Redis). Code: `app/harvest/openstax.py`, `_execute_openstax` in
+`app/harvest/executor.py`, schema revision 0011.
+
+**Source and access method.** One allowlisted book, `chemistry-2e` (`openstax.BOOKS`). OpenStax publishes the
+source of its books in repositories of its own GitHub organization; Chemistry 2e is
+`github.com/openstax/osbooks-chemistry-bundle` (CNXML: one collection file with metadata, licence and table of
+contents; one file per module). Verified 2026-11-25: the collection's `md:uuid`
+`7fccc9cf-9b71-44f6-800b-f9457fd64335` equals the `cnx_id` openstax.org's CMS lists for the book. It is read
+with GitHub's documented REST API (`api.github.com`), GET only, unauthenticated, through the restricted transport
+(§5: allowlisted host, HTTPS, public-IP pinning, no redirects, bounded size and time). Requests, built in code:
+
+| Purpose | Request |
+| --- | --- |
+| snapshot head | `/repos/openstax/osbooks-chemistry-bundle/branches/main` → commit, tree, commit time |
+| snapshot files | `/repos/…/git/trees/<tree>?recursive=1` → blob ids of the collection and of `modules/m<n>/index.cnxml` (truncated listing refused) |
+| collection / module | `/repos/…/git/blobs/<blob>` → base64 content; the git object id of the decoded bytes must equal `<blob>` |
+
+Every id in a path is a validated 40-hex git object id from an earlier answer of the same snapshot. No query
+text, course, user or document data is ever sent. No OpenStax page is scraped; openstax.org's own (undocumented)
+reader/archive endpoints are not used.
+
+**Licence (verified).** Chemistry 2e is **CC BY-NC-SA 4.0** (openstax.org CMS: `license_url`
+`https://creativecommons.org/licenses/by-nc-sa/4.0/`; the repository's LICENSE and the collection's
+`md:license`). Not CC BY: older OpenStax terms and other books differ, so the licence is checked per run, from the
+pinned collection itself, before any module of the run is fetched: licence URL and text, `md:uuid`, `md:slug`,
+`md:title`, `md:language` must match the allowlist entry, else the run fails (`provider_licence_mismatch`,
+`provider_licence_unverified`, `provider_book_mismatch`; non-retryable, source briefly blocked, nothing new
+accepted, existing documents untouched).
+
+**Identity and versions.** A resource is one module (book page). `page_id` = the digits of OpenStax's module id
+(`m68664` → 68664; lossless). OpenStax has no numeric revisions (its pipeline versions books by git commit): the
+version is the module file's git blob SHA-1 (`external_resources.last_revision_key`,
+`external_document_versions.revision_key`, `revision_id` NULL). Stored per version: canonical URL (module file on
+`main`), revision URL (the same file at the snapshot commit), commit time, licence and URL, attribution
+(module and chapter title, book title, authors Paul Flowers, Klaus Theopold, Richard Langley, William R.
+Robinson, PhD, OpenStax/Rice University 2019, book URL, "Access for free at openstax.org", module id, commit,
+licence, and the list of changes), content SHA-256. Documents: `origin external`, `kind textbook`, title
+`Chemistry 2e: <chapter> - <module title>`, listed with `source_name: "OpenStax"`.
+
+**Run.** Same claim, lease, fencing, gates, budget, yields and failures as §3; a different slice body:
+1. *Snapshot* (once per run, 3 one-request units): branch head → tree → collection (licence/identity check).
+   The run then only names git objects of that snapshot, so a run never mixes two versions of the book.
+2. *Refresh*: due resources of the course × source, compared with the snapshot. Same blob and not missing or an
+   orphaned duplicate → checked, **no request**. Different blob → that blob is fetched and persisted (§7 rules:
+   unchanged text, duplicate, new version while the indexed one stays visible). Module no longer in any chapter →
+   missing observation (evidence: module id, commit), confirmed only by a second observation (§7).
+3. *Catalogue*: chapter modules (preface and appendices excluded) not yet known to the course, in book order,
+   until the course quota, `HARVEST_MAX_ACCEPTED_PER_RUN` or `HARVEST_MAX_CANDIDATES_PER_RUN`. The cursor is
+   written in the same transaction as each decision. There are no queries for OpenStax: the operator-approved
+   unit is the book (source creation, `enable-source`, course opt-in, quota).
+
+**Extraction.** CNXML parsed with the standard library after refusing any DOCTYPE/ENTITY declaration (no entity
+expansion, no external entities) and bounded nesting; the module's `md:content-id` must equal the requested id.
+Kept: paragraphs, lists, notes (feature boxes) and inline text (terms, emphasis, sub/superscripts). Excluded:
+figures, media and captions (third-party image credits), tables, equations and all MathML, worked examples,
+exercises/problems/solutions, footnotes, glossaries, block quotations, "Link to Learning" boxes, exercise and
+key-equation sections. Section locators are genuine: a `<section>` with an `id` and a `<title>` starts a section
+(level 2, nested up to 6, anchor = the CNXML id OpenStax uses); text after a nested section continues its parent
+under the parent's locator; text before the first section is the lead. Same quality gates as Wikipedia.
+
+**Budget.** GitHub allows 60 unauthenticated REST requests per hour per client address. `init-source` writes
+3600 s / 50 requests / 2000 ms for an OpenStax source. HTTP 403/429 with `x-ratelimit-remaining: 0` (reset time)
+or `Retry-After` is a throttle (the source is blocked until then, the run yields); any other 403 or a 404 is
+permanent for the run. A first full harvest (≈ 135 chapter modules) therefore spans several hours and several runs
+(`trigger` or the refresh schedule).
+
+**Activation prerequisites (in addition to §10).**
+1. Licence review of **CC BY-NC-SA 4.0** for this deployment: NonCommercial (StudyGraph must not be used
+   commercially with this content), ShareAlike (adapted text in answers, quizzes or exports must be offered under
+   the same licence), attribution displayed wherever harvested text or citations appear, and OpenStax's
+   trademark terms (the OpenStax name and logo are not covered by the CC licence; use them only in attribution).
+2. Egress for `worker-harvest` to `api.github.com` (TCP 443) only, besides Wikimedia if Wikipedia is used.
+3. `init-source --provider openstax --book chemistry-2e`, `enable-source`, course opt-in with an explicit
+   `--max-documents`; a staging run against a non-production database.
+
+**Limitations.** One book and one OpenStax source (unique `(provider, language)`); adding a book needs an
+allowlist entry, a licence check and a wider unique index. Mathematics, figures and tables are not in the text, so
+some sentences read with gaps. A module that fails a quality gate (e.g. a short chapter introduction) is
+requested again by each later run's catalogue. A module that moves to another chapter with unchanged text keeps
+its earlier title. GitHub's unauthenticated limit is shared by everything behind the same egress address.

@@ -125,3 +125,28 @@ def test_operator_flow_is_explicit_at_every_step(world, environ, disposable_targ
     assert "enabled=False" in out and "cancelled" in out and "u:p" not in out
     code, _, err = _run(environ, capsys, "status", "--database", "other_db", "--course", str(course))
     assert code == 1 and "does not match" in err
+
+
+def test_openstax_sources_are_created_disabled_for_an_allowlisted_book_only(world, environ, disposable_target, capsys):
+    db = disposable_target.url.database
+    code, _, err = _run(environ, capsys, "init-source", "--database", db, "--provider", "openstax", "--book", "biology-2e")
+    assert code == 1 and "allowlisted" in err
+    code, _, err = _run(environ, capsys, "init-source", "--database", db, "--provider", "openstax", "--book",
+                        "chemistry-2e", "--language", "de")  # fmt: skip
+    assert code == 1 and "'en' only" in err
+    code, _, err = _run(environ, capsys, "init-source", "--database", db, "--provider", "wikipedia", "--language", "en",
+                        "--book", "chemistry-2e")  # fmt: skip
+    assert code == 1 and "openstax provider only" in err
+    code, out, _ = _run(environ, capsys, "init-source", "--database", db, "--provider", "openstax", "--book", "chemistry-2e")
+    assert code == 0 and "disabled" in out
+    source = uuid.UUID(out.strip().rsplit(" ", 1)[-1])
+    world.sources.append(source)
+    row = world.rows("SELECT * FROM sources WHERE id = :s", s=source)[0]
+    assert (row["enabled"], row["provider"], row["language"], row["provider_book"], row["licence"]) == (
+        False, "openstax", "en", "chemistry-2e", "CC BY-NC-SA 4.0")
+    budget = world.rows("SELECT * FROM harvest_provider_budgets WHERE source_id = :s", s=source)[0]
+    assert (budget["window_seconds"], budget["max_requests"], budget["min_interval_ms"]) == (3600, 50, 2000)
+    code, out, _ = _run(environ, capsys, "init-source", "--database", db, "--provider", "openstax", "--book", "chemistry-2e")
+    assert code == 0 and "unchanged" in out
+    assert _run(environ, capsys, "enable-source", "--database", db, "--source", str(source))[0] == 0
+    assert world.scalar("SELECT enabled FROM sources WHERE id = :s", s=source) is True

@@ -1,6 +1,7 @@
 """Harvesting operator commands (M6). Run inside a core-api or worker container:
 
     python -m app.harvest.admin init-source    --database NAME --provider wikipedia --language en
+    python -m app.harvest.admin init-source    --database NAME --provider openstax --book chemistry-2e
     python -m app.harvest.admin enable-source  --database NAME --source SOURCE_ID
     python -m app.harvest.admin disable-source --database NAME --source SOURCE_ID
     python -m app.harvest.admin course-opt-in  --database NAME --course COURSE_ID --source SOURCE_ID [--max-documents N]
@@ -32,7 +33,7 @@ from sqlalchemy import text
 from ..config import Settings
 from ..ingestion.admin import AdminError, guarded_session_factory
 from ..migration_safety import UnsafeMigrationTarget
-from . import queries, runs, wikipedia
+from . import openstax, queries, runs, wikipedia
 
 
 def _uuid(value: str, name: str) -> uuid.UUID:
@@ -47,44 +48,56 @@ def _factory(args, environ):
     return factory, engine
 
 
+def _source_values(args, settings: Settings) -> dict:
+    """The row an operator creates: provider identity, licence and request budget (validated here)."""
+    if args.provider == wikipedia.PROVIDER:
+        if args.book is not None:
+            raise AdminError("--book applies to the openstax provider only")
+        if args.language not in wikipedia.LANGUAGES:
+            raise AdminError(f"language must be one of {', '.join(sorted(wikipedia.LANGUAGES))}")
+        return {"provider": wikipedia.PROVIDER, "l": args.language, "book": None,
+                "domain": wikipedia.endpoint(args.language).host, "licence": wikipedia.LICENCE,
+                "licence_url": wikipedia.LICENCE_URL, "w": settings.harvest_budget_window_seconds,
+                "m": settings.harvest_budget_max_requests, "i": settings.harvest_budget_min_interval_ms}  # fmt: skip
+    if args.provider == openstax.PROVIDER:
+        if args.book not in openstax.BOOKS:
+            raise AdminError(f"--book must be one of {', '.join(sorted(openstax.BOOKS))} (the allowlisted books)")
+        book = openstax.BOOKS[args.book]
+        if args.language not in (None, book.language):
+            raise AdminError(f"{book.slug} is published in '{book.language}' only")
+        return {"provider": openstax.PROVIDER, "l": book.language, "book": book.slug, "domain": openstax.API_HOST,
+                "licence": openstax.LICENCE, "licence_url": openstax.LICENCE_URL,
+                "w": openstax.BUDGET_WINDOW_SECONDS, "m": openstax.BUDGET_MAX_REQUESTS,
+                "i": openstax.BUDGET_MIN_INTERVAL_MS}  # fmt: skip
+    raise AdminError("provider must be wikipedia or openstax (OpenAlex is unavailable)")
+
+
 def cmd_init_source(args, environ, settings: Settings) -> int:
-    if args.provider != wikipedia.PROVIDER:
-        raise AdminError("only the wikipedia provider is implemented (OpenStax and OpenAlex are unavailable)")
-    if args.language not in wikipedia.LANGUAGES:
-        raise AdminError(f"language must be one of {', '.join(sorted(wikipedia.LANGUAGES))}")
+    values = _source_values(args, settings)
     factory, engine = _factory(args, environ)
     try:
         with factory() as session:
             existing = session.execute(
-                text("SELECT id FROM sources WHERE provider = :p AND language = :l"),
-                {"p": args.provider, "l": args.language},
-            ).scalar_one_or_none()
+                text("SELECT id, provider_book FROM sources WHERE provider = :provider AND language = :l"), values
+            ).one_or_none()
             if existing is not None:
-                print(f"source exists: {existing} (unchanged)")
+                if existing.provider_book != values["book"]:
+                    raise AdminError(f"source {existing.id} already harvests another book ({existing.provider_book})")
+                print(f"source exists: {existing.id} (unchanged)")
                 return 0
             source_id = session.execute(
                 text(
-                    "INSERT INTO sources (kind, domain, licence, enabled, provider, language, licence_url) "
-                    "VALUES ('wikipedia', :domain, :licence, false, 'wikipedia', :l, :licence_url) RETURNING id"
+                    "INSERT INTO sources (kind, domain, licence, enabled, provider, language, licence_url, provider_book) "
+                    "VALUES (:provider, :domain, :licence, false, :provider, :l, :licence_url, :book) RETURNING id"
                 ),
-                {
-                    "domain": wikipedia.endpoint(args.language).host,
-                    "licence": wikipedia.LICENCE,
-                    "l": args.language,
-                    "licence_url": wikipedia.LICENCE_URL,
-                },
+                values,
             ).scalar_one()
             session.execute(
                 text(
                     "INSERT INTO harvest_provider_budgets (source_id, window_seconds, max_requests, min_interval_ms) "
                     "VALUES (:s, :w, :m, :i)"
                 ),
-                {
-                    "s": source_id,
-                    "w": settings.harvest_budget_window_seconds,
-                    "m": settings.harvest_budget_max_requests,
-                    "i": settings.harvest_budget_min_interval_ms,
-                },
+                {"s": source_id, "w": values["w"], "m": values["m"], "i": values["i"]},
             )
             session.commit()
     finally:
@@ -282,7 +295,11 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] = os.environ)
             p.add_argument(f"--{option}", required=option not in ("max-documents",))
         return p
 
-    command("init-source", "create a provider source (disabled) and its request budget", "provider", "language")
+    init = sub.add_parser("init-source", help="create a provider source (disabled) and its request budget")
+    init.add_argument("--database", required=True, help="the database name DATABASE_URL must point to")
+    init.add_argument("--provider", required=True, help="wikipedia or openstax")
+    init.add_argument("--language", help="wikipedia: required; openstax: the book's language (optional)")
+    init.add_argument("--book", help="openstax: the allowlisted book slug, e.g. chemistry-2e")
     command("enable-source", "activate a provider source", "source")
     command("disable-source", "deactivate a source; cancels its runs, hides its documents", "source")
     opt_in = sub.add_parser("course-opt-in", help="opt a course in for a provider source")

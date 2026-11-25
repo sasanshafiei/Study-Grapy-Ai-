@@ -56,6 +56,30 @@ held, and it is reconsidered as soon as nobody holds it (`app/harvest/persist.py
 - Test 0010 only on disposable infrastructure (`scripts/test_migrations.sh`); `tests/test_migration_0010.py`
   covers the CHECK and the downgrade.
 
+## Revision 0011 rollout
+
+Revision 0011 (WP-6, OpenStax connector) makes room for a second provider without changing any Wikipedia row:
+
+- `sources.provider_book` (nullable): the allowlisted OpenStax book of an `openstax` source. `sources_provider_check`
+  now admits `openstax` only with language `en`, a licence URL and a book slug; Wikipedia keeps its rule (and a
+  NULL book). The unique index on `(provider, language)` is unchanged: one OpenStax source (one book) for now.
+- Trigger `sources_openstax_insert_disabled`: every inserted `openstax` source row is stored with
+  `enabled = false`, whatever the INSERT says. Activation is only the explicit UPDATE of `enable-source`.
+- `external_resources.last_revision_key` and `external_document_versions.revision_key` (nullable, 40 lowercase
+  hex): OpenStax's version identity, the git blob SHA-1 of the module file. `external_document_versions.revision_id`
+  becomes nullable; its identity CHECK requires exactly one of a positive `revision_id` (Wikipedia) or a
+  `revision_key` (OpenStax). A resource never has both.
+
+Metadata-only: no backfill, no rewrite of existing rows.
+
+- **Deploy order.** `alembic upgrade head` before the new core-api and workers; `REQUIRED_SCHEMA_REVISION` is
+  `0011`. Revision 0011 depends on 0010 (WP-5, PR #23): both ship together, in order.
+- **Downgrade** to 0010 is refused (the migration raises, nothing changes) while any OpenStax source, resource or
+  version exists, because 0010 cannot represent them and provenance is never deleted silently. Remove that state
+  deliberately first; without it the downgrade restores the 0010 constraints and drops the columns and trigger.
+- Test 0011 only on disposable infrastructure; `tests/test_migration_0011.py` covers the refusal and the round trip,
+  `tests/test_harvest_openstax.py` the constraints and the trigger.
+
 ## Everyday commands
 
 ```bash
