@@ -17,7 +17,7 @@ from .indexing.client import InvalidServiceUrl
 from .ingestion.dispatch import CeleryPublisher, Publisher
 from .limits import ConcurrencyLimiter, RateLimiter
 from .quiz.client import AiQuizClient
-from .routers import chat, courses, dashboard, documents, exam_questions, exams, quizzes
+from .routers import admin, chat, courses, dashboard, documents, exam_questions, exams, quizzes
 from .schemas.documents import ErrorBody
 from .schemas.openapi import STRING, enum, exact
 from .storage import LocalFileStorage
@@ -124,6 +124,7 @@ def create_app(
     app.include_router(dashboard.router)
     app.include_router(exam_questions.router)
     app.include_router(exams.router)
+    app.include_router(admin.router)
 
     @app.get("/health", responses={200: {"content": {"application/json": {"schema":
         exact(status=enum("ok"), service=enum("core-api"), env=STRING)}}}})
@@ -161,6 +162,5 @@ def create_app(
 
 app = create_app()
 
-# TODO (CE-1): add routers under app/routers/ for admin. Keep them thin — they validate input,
-# call the AI service or the DB, and shape the response. Authentication is
-# CE-3's app.auth.get_current_user.
+# TODO (CE-1): admin mutations (source enable/disable, harvest trigger, job retry) are a later
+# work package; the read-only admin endpoints are in app/routers/admin.py (WP-4).
