@@ -124,7 +124,7 @@ def read_failed(exc: SQLAlchemyError) -> ApiError:
 
 
 # M6: display names of provider-managed sources (legacy sources keep source_name = None).
-SOURCE_DISPLAY_NAMES = {"wikipedia": "Wikipedia"}
+SOURCE_DISPLAY_NAMES = {"wikipedia": "Wikipedia", "openstax": "OpenStax"}
 
 
 def _harvested_visible():

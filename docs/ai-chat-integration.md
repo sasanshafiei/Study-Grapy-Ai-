@@ -172,7 +172,8 @@ slide numbering, `{"section": s}` / `{"heading": s}` → "Section s"; `snippet` 
 matching passage of `chunks.text`; `provenance` (WP-5) = `null` for class material and for
 external material that was not harvested, otherwise the cited document version's own
 `external_document_versions` row: `{source_url, revision_id, revision_url, attribution, licence,
-licence_url}` (`source_url` = the version's `canonical_url`). The row is joined on the cited
+licence_url}` (`source_url` = the version's `canonical_url`); for OpenStax material (WP-6) `revision_id` is
+`null` and the object adds `revision_key` (the git blob SHA-1 of the source module), never both. The row is joined on the cited
 document id, so it is always that exact revision, and nothing in it comes from the AI response:
 the AI citation keys stay exactly `marker, chunk_id, document_id, origin, quote`, and any other key
 rejects the answer. A harvested document (`documents.external_resource_id` set) whose version row

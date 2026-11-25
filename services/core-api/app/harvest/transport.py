@@ -5,8 +5,10 @@ talks to a fixed HTTPS host and path chosen by code (never by the database, a
 setting or a provider response):
 
 - Destination. The host comes from `ProviderEndpoint` (for Wikipedia,
-  "<language>.wikipedia.org" for an allowlisted language) and the path is
-  fixed ("/w/api.php"). Port 443, HTTPS only. Query parameters are built by
+  "<language>.wikipedia.org" for an allowlisted language; for OpenStax,
+  "api.github.com") and the path is fixed ("/w/api.php") or, for OpenStax,
+  built in code from the book's fixed repository and a 40-hex git object id
+  taken from a GitHub answer (validated by ProviderEndpoint). Port 443, HTTPS only. Query parameters are built by
   the connector; no URL from a provider response is ever fetched.
 - One DNS resolution, then pinned connections. The host is resolved exactly
   once per request. Every returned address must be a public unicast address
@@ -145,6 +147,9 @@ class ProviderResponse:
     content_type: str
     body: bytes
     retry_after_seconds: float | None = None
+    # GitHub (OpenStax content, WP-6): seconds until the primary rate-limit window resets, set only when the
+    # response says no request is left (x-ratelimit-remaining: 0 with an x-ratelimit-reset epoch).
+    rate_limit_reset_seconds: float | None = None
 
 
 Resolver = Callable[[str, int], list[str]]
@@ -223,6 +228,13 @@ def _header(headers: list[tuple[bytes, bytes]], name: bytes) -> str | None:
     """The header's value; repeated headers are joined (so a repeated Retry-After parses as invalid)."""
     values = [v.decode("latin-1").strip() for k, v in headers if k == name]
     return ", ".join(values) if values else None
+
+
+def parse_rate_limit_reset(remaining: str | None, reset: str | None, now: float | None = None) -> float | None:
+    """Seconds until a GitHub-style rate-limit window resets, only when no request is left; else None."""
+    if remaining is None or remaining.strip() != "0" or reset is None or not re.fullmatch(r"[0-9]{1,12}", reset.strip()):
+        return None
+    return max(0.0, float(int(reset.strip())) - (time.time() if now is None else now))
 
 
 def parse_retry_after(value: str | None, now: float | None = None) -> float | None:
@@ -384,6 +396,9 @@ class ProviderTransport:
             content_type=(_header(head.headers, b"content-type") or "").lower(),
             body=b"".join(chunks),
             retry_after_seconds=parse_retry_after(_header(head.headers, b"retry-after")),
+            rate_limit_reset_seconds=parse_rate_limit_reset(
+                _header(head.headers, b"x-ratelimit-remaining"), _header(head.headers, b"x-ratelimit-reset")
+            ),
         )
 
 

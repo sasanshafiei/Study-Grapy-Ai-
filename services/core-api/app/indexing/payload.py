@@ -29,6 +29,9 @@ page-based body: the same keys, bytes, content digest and idempotency key as
 before (no new key is added to it). A service receives a section-based
 document only after it advertised "section" in its capabilities' optional
 "locators" list (app/indexing/client.py, app/indexing/pipeline.py).
+An OpenStax version (WP-6) has no numeric revision: its attribution carries
+"revision_id": null and "revision_key" (the git blob SHA-1 of the module
+file); Wikipedia attributions are unchanged (no "revision_key" key).
 
 Nothing here talks to the network; load_content only reads.
 """
@@ -57,6 +60,7 @@ class InvalidIndexContent(ValueError):
 
 LOCATOR_SCHEMES = ("page", "section")
 MAX_ANCHOR = 255
+_REVISION_KEY = re.compile(r"[0-9a-f]{40}")
 _ATTRIBUTION_KEYS = ("page_id", "revision_id", "revision_url", "canonical_url", "licence_url", "attribution", "provider")
 
 
@@ -195,10 +199,16 @@ def _section_sections(rows: Sequence[Mapping]) -> list[dict]:
 def _attribution(provenance: Mapping) -> dict:
     if set(_ATTRIBUTION_KEYS) - set(provenance):
         raise InvalidIndexContent("external provenance is incomplete")
-    for key in ("page_id", "revision_id"):
-        if type(provenance[key]) is not int or provenance[key] < 1:
-            raise InvalidIndexContent(f"{key} is not a positive integer")
+    key = provenance.get("revision_key")
+    numeric = ("page_id",) if key is not None else ("page_id", "revision_id")
+    for name in numeric:
+        if type(provenance[name]) is not int or provenance[name] < 1:
+            raise InvalidIndexContent(f"{name} is not a positive integer")
     result = {"page_id": provenance["page_id"], "revision_id": provenance["revision_id"]}
+    if key is not None:  # OpenStax: the provider's git version id instead of a numeric revision
+        if provenance["revision_id"] is not None or not isinstance(key, str) or not _REVISION_KEY.fullmatch(key):
+            raise InvalidIndexContent("revision_key is not a git object id (or a revision id is also set)")
+        result["revision_key"] = key
     for key in ("revision_url", "canonical_url", "licence_url", "attribution", "provider"):
         result[key] = _optional_str(provenance[key], key, 4096)
         if not result[key]:
@@ -252,7 +262,8 @@ _METADATA = text(
 _SECTIONS = "SELECT ordinal, text, locator FROM document_sections WHERE document_id = :id ORDER BY ordinal"
 # Immutable provenance of a harvested version (M6); its stale columns are not read.
 _PROVENANCE = text(
-    "SELECT v.page_id, v.revision_id, v.revision_url, v.canonical_url, v.licence_url, v.attribution, s.provider "
+    "SELECT v.page_id, v.revision_id, v.revision_key, v.revision_url, v.canonical_url, v.licence_url, v.attribution, "
+    "s.provider "
     "FROM external_document_versions v JOIN documents d ON d.id = v.document_id "
     "JOIN sources s ON s.id = d.source_id WHERE v.document_id = :id"
 )

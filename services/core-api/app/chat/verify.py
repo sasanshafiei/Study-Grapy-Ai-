@@ -35,7 +35,8 @@ numbering is not known; {"slide": n} -> "Slide n" only when the indexer
 recorded real slide numbers; {"section": s} or {"heading": s} -> "Section s"),
 snippet (the matching passage of chunks.text), provenance (WP-5: the cited
 version's external_document_versions row - source_url, revision_id,
-revision_url, attribution, licence, licence_url - or null for class material
+revision_url, attribution, licence, licence_url; for OpenStax (WP-6)
+revision_id is null and revision_key holds the git blob SHA - or null for class material
 and for external material that was not harvested; never filled in or guessed).
 
 Verification establishes provenance only: each quoted passage exists in a
@@ -72,7 +73,9 @@ MAX_ATTRIBUTION_CHARS = 2000
 MAX_SAFE_INTEGER = 2**53 - 1  # revision ids must be exact in JavaScript clients
 
 _LICENCE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9 .+-]{0,98}[A-Za-z0-9.+-])?")
-_VERSION_COLUMNS = ("resource_id", "revision_id", "canonical_url", "revision_url", "attribution", "licence", "licence_url")
+_VERSION_COLUMNS = ("resource_id", "revision_id", "revision_key", "canonical_url", "revision_url", "attribution", "licence",
+                    "licence_url")  # fmt: skip
+_REVISION_KEY = re.compile(r"[0-9a-f]{40}")
 
 _PUBLIC_ORIGIN = {"class": "class", "external": "external", "web_cache": "web"}
 _WHITESPACE = re.compile(r"\s+")
@@ -139,7 +142,11 @@ def public_provenance(resource_id: uuid.UUID | None, version: Mapping[str, objec
     if resource_id is None or version["resource_id"] != resource_id:
         raise VerificationFailed("provenance_mismatch")
     revision_id = version["revision_id"]
-    if type(revision_id) is not int or not 1 <= revision_id <= MAX_SAFE_INTEGER:
+    revision_key = version.get("revision_key")
+    if revision_key is not None:  # OpenStax (WP-6): a git version id, never also a numeric revision
+        if revision_id is not None or not isinstance(revision_key, str) or not _REVISION_KEY.fullmatch(revision_key):
+            raise VerificationFailed("provenance_revision")
+    elif type(revision_id) is not int or not 1 <= revision_id <= MAX_SAFE_INTEGER:
         raise VerificationFailed("provenance_revision")
     attribution = version["attribution"]
     if (not isinstance(attribution, str) or not attribution.strip() or len(attribution) > MAX_ATTRIBUTION_CHARS
@@ -152,8 +159,11 @@ def public_provenance(resource_id: uuid.UUID | None, version: Mapping[str, objec
     if any(url is None for url in urls):
         raise VerificationFailed("url_unsafe")
     source_url, revision_url, licence_url = urls
-    return {"source_url": source_url, "revision_id": revision_id, "revision_url": revision_url,
-            "attribution": attribution.strip(), "licence": licence, "licence_url": licence_url}  # fmt: skip
+    result = {"source_url": source_url, "revision_id": revision_id, "revision_url": revision_url,
+              "attribution": attribution.strip(), "licence": licence, "licence_url": licence_url}  # fmt: skip
+    if revision_key is not None:
+        result["revision_key"] = revision_key
+    return result
 
 
 def public_title(title: object) -> str:
