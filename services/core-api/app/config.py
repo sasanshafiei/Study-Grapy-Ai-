@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     redis_url: SecretStr = SecretStr("redis://redis:6379/0")
     ai_service_url: str = "http://ai-service:8000"
     environment: str = "development"
+    # Browser origins allowed to call the API cross-origin (F12, app/cors.py): a JSON array of exact
+    # origins such as ["https://app.example.edu"]. Empty (default): same-origin only, no CORS headers.
+    # Plain http and loopback origins are refused unless ENVIRONMENT is development or test.
+    cors_allowed_origins: list[str] = []
     # Root of the uploaded-file store. docker-compose mounts the persistent
     # `uploads` volume here; nothing creates or touches it until the first upload.
     upload_dir: Path = Path("/data/uploads")
@@ -338,6 +342,9 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _ordered_limits(self) -> "Settings":
         """parse timeout < soft limit < hard limit (< lease), visibility timeout above both."""
+        from .cors import validate_allowed_origins  # local: dependency-free
+
+        validate_allowed_origins(self.cors_allowed_origins, self.environment)  # raises ValueError
         if not self.parse_timeout_seconds < self.parse_task_soft_time_limit_seconds < self.parse_task_time_limit_seconds:
             raise ValueError(
                 "PARSE_TIMEOUT_SECONDS < PARSE_TASK_SOFT_TIME_LIMIT_SECONDS < PARSE_TASK_TIME_LIMIT_SECONDS is required"

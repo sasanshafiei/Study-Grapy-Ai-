@@ -50,6 +50,8 @@ services:
       AI_SERVICE_URL: http://ai-service:8000
       ENVIRONMENT: development
       UPLOAD_DIR: /data/uploads
+      # F12: exact browser origins (JSON array) allowed cross-origin; the CE-2 dev server (`npm run dev`).
+      CORS_ALLOWED_ORIGINS: '["http://localhost:3000"]'
       # M8: the deterministic dashboard is on; analytics and study telemetry stay off until approved.
       DASHBOARD_ENABLED: "true"
       ANALYTICS_ENABLED: "false"

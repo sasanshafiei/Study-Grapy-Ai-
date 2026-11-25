@@ -24,8 +24,33 @@ a fresh review before finalizing.
 
 CE-3 sets `CORS_ALLOWED_ORIGINS` on core-api to a JSON array of exact browser origins agreed with CE-2,
 including the scheme and any non-default port. For example, a local Next.js server can use
-`["http://localhost:3000"]`. The default empty array supports same-origin deployment. Allowlisted
-origins can read these additional headers when the endpoint returns them:
+`["http://localhost:3000"]`. The default empty array supports same-origin deployment: core-api then
+sends no CORS headers at all. The policy lives in `services/core-api/app/cors.py`.
+
+- **Local development.** Compose and `.env.example` allow `http://localhost:3000`, the origin that
+  `npm run dev` in `apps/web` serves. Run the web app with `NEXT_PUBLIC_API_MODE=live` and
+  `NEXT_PUBLIC_API_URL=http://localhost:8000`. A browser treats `http://127.0.0.1:3000` as a
+  different origin, so add that origin as well if you open the app that way.
+- **Staging and production.** Set `ENVIRONMENT` to a value other than `development` or `test`, and
+  list only the deployed web origins, for example `["https://studygraph.example.edu"]`. Outside
+  `development` and `test`, core-api refuses to start when an origin uses `http` or is a loopback
+  host.
+- **Always refused.** Settings validation stops core-api from starting for `*`, `null`, wildcard
+  subdomains, paths or trailing slashes, query strings, fragments, user info, upper-case schemes or
+  hosts, default ports such as `:443`, non-http(s) schemes and duplicate entries. Matching is exact,
+  so each origin must match the browser's `Origin` header.
+- **Bearer authentication.** Browsers send `Authorization: Bearer …` after a preflight. Cookies are
+  not used, so credentialed CORS is off and core-api never sends `Access-Control-Allow-Credentials`.
+  Use the default `credentials: "same-origin"` or `"omit"` in fetch, and never `"include"`. CORS
+  only controls which browser pages can read responses. It does not provide authentication or
+  authorization, and requests from other origins or non-browser clients still need a valid token.
+- **Preflight.** The allowed methods are `GET`, `POST`, `PUT`, `PATCH` and `DELETE`. In addition to
+  the CORS-safelisted request headers, the allowed request headers are `Authorization`,
+  `Content-Type`, `Idempotency-Key` and `If-Match`. Browsers cache a successful preflight for
+  600 seconds. Other methods or headers receive a 400 response. A disallowed origin receives no
+  `Access-Control-*` header. Every response includes `Vary: Origin`.
+
+Allowlisted origins can read these additional headers when the endpoint returns them:
 
 | Response | Headers |
 | --- | --- |
@@ -35,6 +60,11 @@ origins can read these additional headers when the endpoint returns them:
 | Both download formats | `Content-Disposition`, `X-Exam-Renderer-Version` |
 | Draft file | `X-Exam-Version`, `X-Exam-Preview-Fingerprint` |
 | Official file | `X-Exam-Finalized-Version`, `X-Exam-Content-SHA256` |
+
+Browsers can always read the CORS-safelisted response headers, such as `Cache-Control` and
+`Content-Type`. `WWW-Authenticate` is not exposed, but the JSON body of a 401 response includes
+`code`. Unhandled 500 responses contain no CORS headers, so the browser reports them as network
+errors.
 
 The API still checks bearer authentication and course ownership on protected exam routes. A proxy
 in front of the API should forward `Origin`, OPTIONS requests, the API's CORS headers and `Vary: Origin`.
