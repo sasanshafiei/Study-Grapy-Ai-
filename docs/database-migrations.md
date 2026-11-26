@@ -32,7 +32,10 @@ error and creates nothing: tables created that way are invisible to Alembic.
   changing; old revisions must not).
 
 If you run Compose with extra `-f` files (for example a local, untracked override),
-pass the same files to every command below.
+pass the same files to every command below. Run them from the checkout that owns the stack,
+so that they reach its project (`COMPOSE_PROJECT_NAME`, or the folder name by default) and its
+database volume; `docker compose ls` shows which projects exist
+([database-security.md](database-security.md#development-docker-compose)).
 
 ## Revision 0009 rollout
 

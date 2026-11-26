@@ -159,6 +159,3 @@ def create_app(
 
 
 app = create_app()
-
-# TODO (CE-1): admin mutations (source enable/disable, harvest trigger, job retry) are a later
-# work package; the read-only admin endpoints are in app/routers/admin.py (WP-4).

@@ -58,6 +58,12 @@ Order matters: `migrate` (schema owner) first, then `db-init`, then the runtime 
 upgraded as an explicit rollout: back it up first and follow the per-revision notes in
 [docs/database-migrations.md](docs/database-migrations.md). Never delete the volume to upgrade.
 
+Compose names the stack's containers and its database and upload volumes after the project: this
+folder's name unless `COMPOSE_PROJECT_NAME` is set. Two checkouts under one project name share one
+database, and `up` in either replaces the other's containers with its own code. Give the stack whose
+data you keep an explicit name in that checkout's untracked `.env` (see [.env.example](.env.example)
+and [docs/database-security.md](docs/database-security.md#development-docker-compose)).
+
 | Core API probe | Meaning |
 | --- | --- |
 | `GET /health` | Returns 200 when the HTTP process can respond. It makes no dependency calls. Use it for liveness. |
@@ -80,7 +86,9 @@ published on the host (the workers trust what it hands them); see
 proposed AI indexing interface is in
 [docs/ai-indexing-integration.md](docs/ai-indexing-integration.md).
 
-Interactive API docs: http://localhost:8000/docs and http://localhost:8001/docs
+Interactive API docs: http://localhost:8000/docs and http://localhost:8001/docs. Both services are
+published on `127.0.0.1` only, so they are reachable from this machine and not from other devices on
+the network.
 
 Browsers may call core-api cross-origin only from the exact origins in `CORS_ALLOWED_ORIGINS`
 (Compose allows the web dev server, `http://localhost:3000`; the default is same-origin only).

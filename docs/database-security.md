@@ -36,6 +36,8 @@ could be added later without changing this design. It is not provided today.
 ## Development (docker-compose)
 
 - `db` publishes no port. For host tools, publish it on loopback only in an untracked `docker-compose.override.yml`: `services: { db: { ports: ["127.0.0.1:5432:5432"] } }`.
+- core-api and ai-service are published on loopback only (`127.0.0.1:8000`, `127.0.0.1:8001`). A browser, the web dev server and `curl` on the same machine reach them; other devices on the network do not. To test from another device, use staging, or publish a chosen interface in the untracked override: `services: { core-api: { ports: !override ["<host-ip>:8000:8000"] } }`. Remove it when you are done: the development stack has no login and uses development secrets.
+- **Project name.** Compose names the containers and the `pgdata` and `uploads` volumes after the project, which is the checkout's folder name unless `COMPOSE_PROJECT_NAME` is set. Two checkouts under one project name share one database volume, and `docker compose up` in either recreates the containers with its own code and its own compose file (an older branch can publish ports or connect as the superuser again). Set `COMPOSE_PROJECT_NAME` in the untracked `.env` of the one checkout whose stack holds data you keep, and run every command for that stack from there. Check with `docker compose ls` before `up`.
 - Runtime services use `studygraph_app`. Its password comes from `STUDYGRAPH_APP_DB_PASSWORD`, which has a development-only default.
 - `docker compose up` never changes roles, grants, ownership or passwords. Provisioning is an explicit
   operator action: the `db-init` tool (profile `tools`, like `migrate`). It runs as the bootstrap superuser
