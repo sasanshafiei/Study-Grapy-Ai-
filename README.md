@@ -50,6 +50,7 @@ curl localhost:8000/health        # core-api process liveness
 curl localhost:8000/health/db     # database connectivity and pgvector diagnostic
 curl --fail localhost:8000/health/ready  # core-api readiness for traffic
 curl localhost:8001/health        # mock ai-service up
+bash infra/dev/smoke.sh           # all of the above and more, read-only: identity, grants, workers, ports
 ```
 
 Order matters: `migrate` (schema owner) first, then `db-init`, then the runtime services. Until
