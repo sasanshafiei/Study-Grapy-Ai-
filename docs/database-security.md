@@ -51,6 +51,7 @@ could be added later without changing this design. It is not provided today.
   ```
 
 - Running `docker compose exec core-api alembic upgrade head` is now refused (`permission denied for schema public`). This is intended.
+- **Check the running stack** with `bash infra/dev/smoke.sh` (read-only; it never connects as the owner or a superuser). With `ENVIRONMENT=development`, `/health/ready` accepts a privileged role, so readiness alone does not prove the identity above. The script does: the API's connection must be `studygraph_app` with none of the powers the runtime guard refuses; the groups' grants must match `db_privileges.sql` (a table the runtime group cannot read means `db-init` was not re-run after a migration); every login in an AI group may execute only its routine; no other session may be a superuser's. It also checks the schema revision, the workers' start-up checks, the upload store, loopback-only ports and the 401 auth seam. Exit status 0 means every check passed.
 
 **Existing development volume.** Until you run `db-init` once, the runtime services cannot log in
 (`password authentication failed for user "studygraph_app"`). Readiness returns 503 and the workers exit;
