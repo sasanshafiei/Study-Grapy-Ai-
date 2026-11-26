@@ -64,10 +64,10 @@ def test_downgrade_forgets_recorded_duplicates_so_the_older_code_fetches_them_ag
         assert after[duplicate]["duplicate_of_id"] == holder
     finally:
         alembic("upgrade", "head")
-    assert world.scalar("SELECT version_num FROM alembic_version") == head_revision() == "0012"
+    assert world.scalar("SELECT version_num FROM alembic_version") == head_revision() == "0013"
 
 
 def test_core_api_and_workers_require_the_head_revision():
     from app.database_compatibility import REQUIRED_SCHEMA_REVISION
 
-    assert REQUIRED_SCHEMA_REVISION == head_revision() == "0012"
+    assert REQUIRED_SCHEMA_REVISION == head_revision() == "0013"

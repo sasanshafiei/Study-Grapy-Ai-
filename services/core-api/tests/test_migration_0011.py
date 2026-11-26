@@ -41,5 +41,5 @@ def test_downgrade_refuses_while_openstax_state_exists_and_round_trips_without_i
         assert world.scalar("SELECT provider FROM sources WHERE id = :s", s=wiki) == "wikipedia"
     finally:
         alembic("upgrade", "head")
-    assert world.scalar("SELECT version_num FROM alembic_version") == head_revision() == "0012"
+    assert world.scalar("SELECT version_num FROM alembic_version") == head_revision() == "0013"
     assert world.scalar("SELECT count(*) FROM pg_trigger WHERE tgname = 'sources_openstax_insert_disabled'") == 1
