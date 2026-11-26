@@ -1,3 +1,12 @@
+# Project name (WP-13): Compose names this stack's containers, network and volumes (pgdata, uploads)
+# after the project, by default the checkout's folder name. Two checkouts under one project name share
+# the same database volume, and `up` in either recreates the containers with its own code. Give the
+# stack whose data you keep an explicit name in that checkout's untracked .env (COMPOSE_PROJECT_NAME,
+# see .env.example) and never run another checkout under that name.
+#
+# Host exposure: only core-api (8000) and ai-service (8001) are published, on loopback (127.0.0.1)
+# only. PostgreSQL and Redis are not published at all.
+#
 # Database identities (F05, docs/database-security.md). The API and every worker connect as
 # studygraph_app, a login in the unprivileged studygraph_ce_runtime group (row access only, no DDL,
 # not an owner). Only the `migrate` tool below connects as the schema owner, which in this development
@@ -97,6 +106,9 @@ services:
       DATABASE_URL: *runtime-database-url
       REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8000
+      # Internal AI credential (>= 32 characters, from the untracked .env). Chat and quiz generation use
+      # it only while their flags are on; empty or short counts as "not configured" (they answer 503).
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
       ENVIRONMENT: development
       UPLOAD_DIR: /data/uploads
       # F12: exact browser origins (JSON array) allowed cross-origin; the CE-2 dev server (`npm run dev`).
@@ -106,8 +118,10 @@ services:
       ANALYTICS_ENABLED: "false"
       STUDY_EVENTS_ENABLED: "false"
       AI_RECOMMENDATIONS_ENABLED: "false"
+    # Loopback only: reachable from this machine (browser, the CE-2 dev server, curl), not from the
+    # network. Another device needs staging or an untracked override (docs/database-security.md).
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health/ready', timeout=4).close()"]
       interval: 15s
@@ -130,8 +144,9 @@ services:
       dockerfile: services/ai-service/Dockerfile
     environment:
       AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
+    # Loopback only, like core-api. core-api and the workers reach it as ai-service:8000.
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"
     volumes:
       - ./services/ai-service:/app
       - ./contracts/ai-service.openapi.yaml:/contracts/ai-service.openapi.yaml:ro
@@ -183,6 +198,9 @@ services:
       DATABASE_URL: *runtime-database-url
       REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8000
+      # Required (>= 32 characters) only while INDEXING_ENABLED is true: the preflight refuses to start
+      # without it then. Empty is fine while the flag is off.
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
       INDEXING_ENABLED: "false"
       ENVIRONMENT: development
     depends_on:
@@ -243,6 +261,8 @@ services:
       DATABASE_URL: *runtime-database-url
       REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8000
+      # Required (>= 32 characters) only while MASTERY_DELIVERY_ENABLED is true, like worker-index.
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
       MASTERY_DELIVERY_ENABLED: "false"
       ENVIRONMENT: development
     depends_on:

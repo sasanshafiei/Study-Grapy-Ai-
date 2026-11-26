@@ -133,8 +133,9 @@ never shown to users.
   `error` event), never narrowed or widened.
 - **Retrieval isolation** (AI side, M4 §7): every retrieval query filters by the
   request's `course_id` for class material **and** by `documents.status = 'indexed'`,
-  in the same query, through the read-only retriever role / `retrievable_chunks` view
-  proposed in M4 §8. External material: only `origin = 'external'` documents from an
+  in the same query, through the retriever role's only entry point, the definer-rights
+  routine `retrieve_index_chunks(course, origins)` (revision 0009, M4 §8), which applies
+  both filters itself. External material: only `origin = 'external'` documents from an
   enabled source whose chunk **and** document `course_id` both equal the requested
   `course_id`, exactly like class material. Material with a NULL course (globally shared
   external material) is **not** retrievable or citable in M5; it is deferred to M6, which
@@ -284,9 +285,10 @@ requests.
 ## 10. Activation prerequisites (not authorized now)
 
 1. AI-1 implements §3–§5 and agrees to this contract (or a revision of it).
-2. M4 §8 persistence prerequisites are applied by a CE migration: least-privilege
-   retriever role, `retrievable_chunks` view (course + `indexed` filters), chunk course
-   constraints, `index_generations`.
+2. M4 §8 persistence prerequisites, applied by revision 0009: least-privilege retriever
+   role whose only access is `retrieve_index_chunks` (course, origin and `indexed` filters),
+   chunk course constraints, `index_generations`. The retriever login itself is provisioned
+   per deployment ([database-security.md](database-security.md)).
 3. Real indexing (M4) is active, so `indexed` documents and their chunks exist.
 4. Retrieval isolation and draft-exam exclusion are tested on the AI side against the
    shared schema.
