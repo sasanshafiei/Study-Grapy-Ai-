@@ -5,7 +5,7 @@ from sqlalchemy.engine import Connection
 
 from .migration_safety import EXPECTED_SCHEMA
 
-REQUIRED_SCHEMA_REVISION = "0011"
+REQUIRED_SCHEMA_REVISION = "0012"
 
 # F05: only these ENVIRONMENT values may run the API and workers as a privileged database role (the
 # development compose bootstrap user, the disposable test superuser). Every other value, unknown ones

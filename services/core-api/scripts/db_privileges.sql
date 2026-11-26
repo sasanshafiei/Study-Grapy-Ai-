@@ -69,14 +69,14 @@ GRANT USAGE ON SCHEMA public TO studygraph_ce_runtime, studygraph_ai_indexer, st
 --      SELECT ... FOR SHARE, which needs UPDATE on one column. That column cannot actually change:
 --      chunks_generation_fkey only matches the document's single generation key, and chunks_generation_check
 --      forbids clearing it (or setting it on a legacy chunk) without section_ordinal, which stays read-only;
---    - exam_audit_events: append-only (SELECT, INSERT), as its trigger already requires.
+--    - exam_audit_events, admin_audit_events: append-only (SELECT, INSERT), as their triggers already require.
 REVOKE ALL ON ALL TABLES IN SCHEMA public
     FROM PUBLIC, studygraph_ce_runtime, studygraph_ai_indexer, studygraph_ai_retriever;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO studygraph_ce_runtime;
 REVOKE INSERT, UPDATE, DELETE
     ON public.alembic_version, public.index_generations, public.chunk_topics, public.chunks
     FROM studygraph_ce_runtime;
-REVOKE UPDATE, DELETE ON public.exam_audit_events FROM studygraph_ce_runtime;
+REVOKE UPDATE, DELETE ON public.exam_audit_events, public.admin_audit_events FROM studygraph_ce_runtime;
 GRANT UPDATE (generation_key) ON public.chunks TO studygraph_ce_runtime;
 
 -- 4. Sequences: none today (UUID keys). A serial column added later needs nextval (USAGE), never setval.

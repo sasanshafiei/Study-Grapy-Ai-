@@ -193,6 +193,10 @@ def test_no_endpoint_exposes_parsed_content():
         "/api/v1/admin/overview": ["get"],
         "/api/v1/admin/sources": ["get"],
         "/api/v1/admin/jobs": ["get"],
+        # WP-9: audited admin mutations; responses carry ids, statuses and counts only.
+        "/api/v1/admin/sources/{source_id}/enabled": ["put"],
+        "/api/v1/admin/harvest-runs": ["post"],
+        "/api/v1/admin/jobs/{job_id}/retry": ["post"],
         "/health": ["get"],
         "/health/db": ["get"],
         "/health/ready": ["get"],

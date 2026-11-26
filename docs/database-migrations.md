@@ -80,6 +80,26 @@ Metadata-only: no backfill, no rewrite of existing rows.
 - Test 0011 only on disposable infrastructure; `tests/test_migration_0011.py` covers the refusal and the round trip,
   `tests/test_harvest_openstax.py` the constraints and the trigger.
 
+## Revision 0012 rollout
+
+Revision 0012 (WP-9, admin mutations) adds one table and changes nothing else:
+
+- `admin_audit_events`: one row per committed admin mutation (docs/admin-api.md). Trigger
+  `admin_audit_events_guard` refuses an inserted row whose actor is not an active admin and refuses UPDATE and
+  DELETE; `admin_audit_events_truncate_guard` refuses TRUNCATE. `actor_id` references `users`; the audited
+  entity and created run/job have no foreign key, so history survives them.
+
+- **Deploy order.** `alembic upgrade head` before the new core-api and workers; `REQUIRED_SCHEMA_REVISION` is
+  `0012`.
+- **Least-privilege runtime (WP-8).** After the upgrade, re-run `scripts/db_privileges.sql`; the runtime group
+  needs only SELECT and INSERT on `admin_audit_events` (the trigger already refuses the rest). The mutations
+  also lock the admin's `users` row `FOR SHARE`, which needs the UPDATE privilege on `users` the runtime group
+  already holds.
+- **Downgrade** to 0011 is refused while any audit event exists (history is never dropped silently). Remove them
+  deliberately first, as the table owner in one transaction: disable `admin_audit_events_guard`, delete, enable it.
+- Test 0012 only on disposable infrastructure; `tests/test_migration_0012.py` covers the refusal and the round
+  trip, `tests/test_admin_mutations.py` the triggers.
+
 ## Everyday commands
 
 ```bash

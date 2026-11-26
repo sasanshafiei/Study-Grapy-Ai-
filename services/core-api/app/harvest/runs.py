@@ -394,6 +394,29 @@ def cancel_active(session: Session, *, course_id: uuid.UUID | None = None, sourc
     return len(ids)
 
 
+@dataclass(frozen=True)
+class SourceChange:
+    was_enabled: bool
+    cancelled_runs: int
+
+
+def set_source_enabled(session: Session, source_id: uuid.UUID, enabled: bool) -> SourceChange | None:
+    """Switch a provider-managed source on or off (the caller commits); None if there is no such source.
+
+    Locks the source row (global order: sources -> harvest_runs). Enabling only sets the flag: course
+    opt-in, approved queries, HARVEST_ENABLED and the provider budget still gate every run. Disabling
+    also cancels the source's queued and running runs (their attempts are fenced out by the token).
+    """
+    row = session.execute(
+        text("SELECT provider, enabled FROM sources WHERE id = :s FOR NO KEY UPDATE"), {"s": source_id}
+    ).one_or_none()
+    if row is None or row.provider is None:
+        return None
+    session.execute(text("UPDATE sources SET enabled = :e WHERE id = :s"), {"s": source_id, "e": enabled})
+    cancelled = 0 if enabled else cancel_active(session, source_id=source_id, code="source_disabled")
+    return SourceChange(was_enabled=row.enabled is True, cancelled_runs=cancelled)
+
+
 # --- recovery and history -----------------------------------------------------------------------------
 
 

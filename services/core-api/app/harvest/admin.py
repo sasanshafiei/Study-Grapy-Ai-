@@ -111,13 +111,10 @@ def cmd_set_source(args, environ, settings: Settings, enabled: bool) -> int:
     factory, engine = _factory(args, environ)
     try:
         with factory() as session:
-            row = session.execute(
-                text("SELECT provider FROM sources WHERE id = :s FOR NO KEY UPDATE"), {"s": source_id}
-            ).one_or_none()
-            if row is None or row.provider is None:
+            change = runs.set_source_enabled(session, source_id, enabled)
+            if change is None:
                 raise AdminError("no provider-managed source with this id")
-            session.execute(text("UPDATE sources SET enabled = :e WHERE id = :s"), {"s": source_id, "e": enabled})
-            cancelled = 0 if enabled else runs.cancel_active(session, source_id=source_id, code="source_disabled")
+            cancelled = change.cancelled_runs
             session.commit()
     finally:
         engine.dispose()
