@@ -403,15 +403,19 @@ async def _file(request: Request, user: CurrentUser, course_id: str, exam_id: st
     if variant not in ("student", "answer_key") or fmt not in ("pdf", "docx"):
         raise export.invalid_export_option()
     eid = exam_id_of(exam_id)
-    meta = await run_in_threadpool(export.prepare, state.session_factory, settings, user, course, eid, variant, fmt,
-                                   preview_file=preview_file)  # fmt: skip
+    # Admission (A03): the rate limit and the render slot come before the snapshot, so a refused request
+    # never reads the exam. Only the owner of the course gets this far, so a 429 discloses nothing.
     retry = state.exam_export_rate_limiter.hit(user.id)
     if retry is not None:
         raise export.rate_limited(retry)
     lease = state.exam_export_limiter.try_acquire(user.id)
     if lease is None:
         raise export.busy()
+    # Nothing between try_acquire and `try` can raise or await. The slot covers preparation and rendering
+    # and is released exactly once on every path: errors, timeouts, unexpected exceptions, cancellation.
     try:
+        meta = await run_in_threadpool(export.prepare, state.session_factory, settings, user, course, eid, variant, fmt,
+                                       preview_file=preview_file)  # fmt: skip
         rendered = await run_in_threadpool(export.render, fmt, meta["model"], export.limits_for(settings, fmt),
                                            timestamp=meta["timestamp"])  # fmt: skip
     except export.RenderFailed as exc:
