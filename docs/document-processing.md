@@ -449,6 +449,11 @@ or command; remote control, events, gossip and mingle are disabled.
 Not done in M3 development (the development database stays at 0002). With the Compose
 files you normally use (`-f docker-compose.yml -f compose.local.yml`):
 
+> Historical (M3, revision 0003). Since F05 (WP-8) the runtime login cannot run DDL, so
+> steps 4 and 5 now use `run --rm migrate alembic …` instead of `run --rm core-api alembic …`,
+> followed by `run --rm db-init` before step 6 ([database-migrations.md](database-migrations.md),
+> [database-security.md](database-security.md)).
+
 1. Recreate Redis without its host port first (`docker compose … up -d redis`: the
    Compose file no longer publishes it; check that nothing on the host relies on
    `localhost:6379`; coordinate with CE-3). Redis keeps no job state that matters:
@@ -534,7 +539,8 @@ services' requirements into one environment does not work (different FastAPI ver
   ports). Workers need the `uploads` volume, `DATABASE_URL`, `REDIS_URL`, `UPLOAD_DIR`;
   Beat only `REDIS_URL`. One Beat instance only. `stop_grace_period` ≥ 210 s for the
   parse worker.
-- Order: migrate (`run --rm core-api alembic upgrade head`), `init-storage` once, then
+- Order: migrate as the schema owner (`run --rm migrate`), runtime grants (`db_privileges.sql`;
+  `run --rm db-init` in Compose), `init-storage` once, then
   start the workers. Workers exit with status 78 on a wrong schema revision or missing
   settings; a restart policy (`unless-stopped`) is reasonable for them.
 - Resources: each parse slot may use up to `PARSE_MEMORY_LIMIT_MB` (512 MiB) in its
