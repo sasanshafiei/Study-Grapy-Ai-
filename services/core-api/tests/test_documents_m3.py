@@ -151,6 +151,8 @@ def test_no_endpoint_exposes_parsed_content():
     paths = create_app().openapi()["paths"]
     assert {path: sorted(methods) for path, methods in paths.items()} == {
         "/api/v1/courses/{course_id}/documents": ["get", "post"],
+        # WP-10: withdrawal answers 204 with no body; it never reads or returns parsed content.
+        "/api/v1/documents/{document_id}": ["delete"],
         # M5: course list/create/join and topics (no document content), and chat, whose
         # snippets come from verified retrieval chunks, never from document_sections.
         "/api/v1/courses": ["get", "post"],

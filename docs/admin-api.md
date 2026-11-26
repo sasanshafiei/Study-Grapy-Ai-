@@ -6,7 +6,7 @@ nothing, and three audited mutations (see [Mutations](#mutations-wp-9)). Shapes 
 
 | Endpoint | Query parameters | Returns |
 | --- | --- | --- |
-| `GET /api/v1/admin/overview` | none | feature switches, source totals, document counts by status, parse/index job and harvest run counts by status |
+| `GET /api/v1/admin/overview` | none | feature switches, source totals, document counts by status (incl. `withdrawn`, WP-10), parse/index job and harvest run counts by status |
 | `GET /api/v1/admin/sources` | `enabled=true\|false`, `limit`, `cursor` | `{items, next_cursor}`: each source's provider, language, domain, licence, enabled, number of courses with a harvest target, document counts by status, and its latest harvest run |
 | `GET /api/v1/admin/jobs` | `kind=parse\|index\|harvest`, `status=queued\|running\|succeeded\|failed\|cancelled`, `limit`, `cursor` | `{items, next_cursor}`: document parse/index jobs and harvest runs with status, timestamps, attempts, subject ids and a safe error summary |
 

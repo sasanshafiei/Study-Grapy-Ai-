@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from ..auth import CurrentUser, get_current_user
@@ -118,3 +118,35 @@ async def upload_course_document(
             dispatch.publish_new_job, state.session_factory, state.publisher, response.job_id, state.settings
         )
     return response
+
+
+@router.delete(
+    "/documents/{document_id}",
+    status_code=204,
+    response_class=Response,
+    responses={
+        500: {"model": ErrorBody},
+        401: {"model": ErrorBody, "description": "Not signed in", "headers": BEARER},
+        403: {"model": ErrorBody, "description": "Account disabled, or not the professor who owns the course"},
+        404: {"model": ErrorBody, "description": "Document not found (or its course is not visible to the caller)"},
+        409: {
+            "model": ErrorBody,
+            "description": "document_not_withdrawable: harvested or other external material (it follows its source)",
+        },
+        422: validation_error(),
+        503: {"model": ErrorBody, "description": "database_unavailable; repeating the request is safe"},
+    },
+    summary="Withdraw a class upload from its course",
+    description=(
+        "Only the professor who owns the course. The document disappears from the course's materials, "
+        "is never used again for retrieval, chat or quiz citations, and its queued or running processing "
+        "jobs are cancelled. Withdrawal is final and idempotent: repeating the request answers 204 again. "
+        "The same file can be uploaded again afterwards (as a new document). The stored file and derived "
+        "index data are retained for a later purge; nothing is returned."
+    ),
+)
+def withdraw_document(
+    document_id: uuid.UUID, request: Request, user: CurrentUser = Depends(get_current_user)
+) -> Response:
+    documents.withdraw_document(request.app.state.session_factory, user, document_id)
+    return Response(status_code=204)

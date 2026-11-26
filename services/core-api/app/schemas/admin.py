@@ -44,6 +44,10 @@ class AdminDocumentCounts(_Strict):
     stale: int = Field(ge=0)
 
 
+class AdminOverviewDocumentCounts(AdminDocumentCounts):
+    withdrawn: int = Field(ge=0, description="Class uploads withdrawn by their course's professor (WP-10).")
+
+
 class AdminIngestionCounts(_Strict):
     queued: int = Field(ge=0)
     running: int = Field(ge=0)
@@ -65,7 +69,7 @@ class AdminOverview(_Strict):
     as_of: str
     features: AdminFeatures
     sources: AdminSourceTotals
-    documents: AdminDocumentCounts
+    documents: AdminOverviewDocumentCounts
     jobs: AdminJobCounts
 
 

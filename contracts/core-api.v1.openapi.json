@@ -575,7 +575,7 @@
             "type": "string"
           },
           "documents": {
-            "$ref": "#/components/schemas/AdminDocumentCounts"
+            "$ref": "#/components/schemas/AdminOverviewDocumentCounts"
           },
           "features": {
             "$ref": "#/components/schemas/AdminFeatures"
@@ -595,6 +595,46 @@
           "jobs"
         ],
         "title": "AdminOverview",
+        "type": "object"
+      },
+      "AdminOverviewDocumentCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "failed": {
+            "minimum": 0.0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "indexed": {
+            "minimum": 0.0,
+            "title": "Indexed",
+            "type": "integer"
+          },
+          "pending": {
+            "minimum": 0.0,
+            "title": "Pending",
+            "type": "integer"
+          },
+          "stale": {
+            "minimum": 0.0,
+            "title": "Stale",
+            "type": "integer"
+          },
+          "withdrawn": {
+            "description": "Class uploads withdrawn by their course's professor (WP-10).",
+            "minimum": 0.0,
+            "title": "Withdrawn",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pending",
+          "indexed",
+          "failed",
+          "stale",
+          "withdrawn"
+        ],
+        "title": "AdminOverviewDocumentCounts",
         "type": "object"
       },
       "AdminSource": {
@@ -19191,6 +19231,127 @@
         "summary": "List a course's topics",
         "tags": [
           "courses"
+        ]
+      }
+    },
+    "/api/v1/documents/{document_id}": {
+      "delete": {
+        "description": "Only the professor who owns the course. The document disappears from the course's materials, is never used again for retrieval, chat or quiz citations, and its queued or running processing jobs are cancelled. Withdrawal is final and idempotent: repeating the request answers 204 again. The same file can be uploaded again afterwards (as a new document). The stored file and derived index data are retained for a later purge; nothing is returned.",
+        "operationId": "withdraw_document_api_v1_documents__document_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not signed in",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge.",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "Bearer"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Account disabled, or not the professor who owns the course"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Document not found (or its course is not visible to the caller)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "document_not_withdrawable: harvested or other external material (it follows its source)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorBody"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Invalid application input or malformed path parameter."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "database_unavailable; repeating the request is safe"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Withdraw a class upload from its course",
+        "tags": [
+          "documents"
         ]
       }
     },

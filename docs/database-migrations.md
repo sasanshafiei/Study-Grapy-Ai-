@@ -100,6 +100,31 @@ Revision 0012 (WP-9, admin mutations) adds one table and changes nothing else:
 - Test 0012 only on disposable infrastructure; `tests/test_migration_0012.py` covers the refusal and the round
   trip, `tests/test_admin_mutations.py` the triggers.
 
+## Revision 0013 rollout
+
+Revision 0013 (WP-10, document withdrawal, [document-withdrawal.md](document-withdrawal.md)) changes
+`documents` only and rewrites no row:
+
+- `documents_status_check` gains `withdrawn`; new nullable columns `withdrawn_at` (timestamptz) and
+  `withdrawn_by` (→ `users`); `documents_withdrawal_check` allows `withdrawn` only on a course's class upload
+  and only with both columns set (and neither column on other rows).
+- Trigger `documents_withdrawal_final` (function `studygraph_documents_withdrawal_final`) refuses any UPDATE of
+  a row that is already withdrawn. DELETE is not affected.
+- `documents_course_id_content_hash_idx` is rebuilt with `AND status <> 'withdrawn'`, so a withdrawn file can be
+  uploaded again. The rebuild and the constraint changes run under one `ACCESS EXCLUSIVE` lock on `documents`.
+
+- **Deploy order.** `alembic upgrade head` before the new core-api and workers; `REQUIRED_SCHEMA_REVISION` is
+  `0013`.
+- **Least-privilege runtime (WP-8).** No grant change: table-level DML on `documents` covers the new columns,
+  the withdrawal locks `users`/`courses` `FOR SHARE` as an upload does, and a trigger function needs no
+  EXECUTE grant to fire. Re-run `scripts/db_privileges.sql` after the upgrade as usual.
+- **Downgrade** to 0012 is refused while any withdrawn document exists (the old CHECK and unique index cannot
+  hold them). Remove them deliberately first, as the owner: `DELETE FROM documents WHERE status = 'withdrawn'`
+  (jobs, sections, the index generation and its chunks cascade; legacy chunks without a generation must be
+  removed first, as for any document). Their stored files are not removed by SQL.
+- Test 0013 only on disposable infrastructure; `tests/test_wp10_withdrawal.py` covers the refusal, the round
+  trip and the trigger as the runtime role.
+
 ## Everyday commands
 
 ```bash

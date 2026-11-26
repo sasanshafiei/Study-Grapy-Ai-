@@ -50,7 +50,7 @@ def test_downgrade_refuses_while_audit_events_exist_and_round_trips_without_them
     try:
         with pytest.raises(pytest.fail.Exception, match="downgrade to 0011 refused"):
             alembic("downgrade", "0011")
-        assert world.scalar("SELECT version_num FROM alembic_version") == "0012"  # nothing was changed
+        assert world.scalar("SELECT version_num FROM alembic_version") == head_revision()  # nothing was changed (one transaction)
         assert world.scalar("SELECT count(*) FROM admin_audit_events WHERE actor_id = :a", a=admin.id) == 1
         with world.engine.begin() as connection:  # the deliberate removal procedure (as the owner)
             remove_admin_audit_state(connection, [admin.id])
@@ -58,5 +58,5 @@ def test_downgrade_refuses_while_audit_events_exist_and_round_trips_without_them
         assert _objects(world) == (False, 0, 0)
     finally:
         alembic("upgrade", "head")
-    assert world.scalar("SELECT version_num FROM alembic_version") == head_revision() == "0012"
+    assert world.scalar("SELECT version_num FROM alembic_version") == head_revision() == "0013"
     assert _objects(world) == (True, 2, 1)

@@ -1,4 +1,4 @@
-"""Course documents: listing and accepting an upload.
+"""Course documents: listing, accepting an upload and withdrawing one (WP-10, at the end).
 
 Accepting an upload creates two kinds of state that share no transaction: a
 file in storage and, in PostgreSQL, the document row plus its first ingestion
@@ -181,7 +181,7 @@ def list_documents(session_factory: sessionmaker[Session], user: CurrentUser, co
         )
         .outerjoin(User, User.id == Document.uploaded_by)
         .outerjoin(Source, Source.id == Document.source_id)
-        .where(Document.course_id == course_id, _harvested_visible())
+        .where(Document.course_id == course_id, Document.status != "withdrawn", _harvested_visible())
         .order_by(Document.created_at.desc(), Document.id.desc())
     )
     try:
@@ -419,6 +419,7 @@ def _find_duplicate(session: Session, course_id: uuid.UUID, sha256: str) -> tupl
             Document.course_id == course_id,
             Document.origin == "class",
             Document.storage_key.is_not(None),
+            Document.status != "withdrawn",  # as the partial unique index DEDUP_INDEX (revision 0013)
             Document.content_hash == sha256,
         )
     ).first()
@@ -497,3 +498,126 @@ def _commit_outcome(
     except Exception:  # noqa: BLE001 - verification is best effort; fall back to what the error proves
         log.warning("could not verify the commit outcome of document %s", document_id, exc_info=True)
     return CommitOutcome.ROLLED_BACK if _server_rejected(exc) else CommitOutcome.UNKNOWN
+
+
+# --- withdrawal (WP-10) ----------------------------------------------------------------------------
+
+
+WITHDRAWN_JOB_MESSAGE = "document_withdrawn: the course's professor withdrew the document"
+
+
+def document_not_found() -> ApiError:
+    return ApiError(404, "document_not_found", "Document not found.")
+
+
+def withdraw_not_allowed() -> ApiError:
+    return ApiError(403, "withdraw_not_allowed", "Only the professor who owns this course can remove materials.")
+
+
+def not_withdrawable() -> ApiError:
+    return ApiError(
+        409,
+        "document_not_withdrawable",
+        "Materials from external sources follow the course's source settings and cannot be removed here.",
+    )
+
+
+def withdraw_failed(exc: SQLAlchemyError) -> ApiError:
+    """Withdrawal is idempotent, so an unconfirmed outcome is answered with a plain "try again"."""
+    if isinstance(exc, OperationalError) or (isinstance(exc, DBAPIError) and exc.connection_invalidated):
+        return ApiError(503, "database_unavailable", "The material could not be removed right now. Try again.")
+    return ApiError(500, "server_error", "Something went wrong on the server. Try again later.")
+
+
+def withdraw_document(session_factory: sessionmaker[Session], user: CurrentUser, document_id: uuid.UUID) -> bool:
+    """Withdraw a class upload: terminal status `withdrawn`, its active jobs cancelled, in one transaction.
+
+    Returns True when this call withdrew it, False when it already was withdrawn (repeated DELETE).
+
+    Authorization is decided on the locked user and course rows inside the write transaction (as for an
+    upload): a document that does not exist, has no course, or belongs to a course the caller cannot read
+    answers 404 (ids cannot be probed across courses); a reader who does not own the course gets 403;
+    the owner gets 409 for anything but a class upload (harvested and other external material follows its
+    source's lifecycle). Lock order: user and course rows (FOR SHARE), then the document's job rows
+    (parse before index), then the document, as the ingestion state machine (app/ingestion/jobs.py).
+
+    Once the document row is locked no job of it can be created or published (every writer re-checks the
+    locked status), so cancelling the queued and running jobs found by a statement after that lock is
+    complete. A running attempt is fenced (its writes require `status = 'running'` and its token);
+    commit_index_generation refuses a document that is not pending and an index job that is not running;
+    the documents_withdrawal_final trigger refuses any later change. Nothing is deleted: the stored file,
+    sections, chunks and index generation are retained (docs/document-withdrawal.md).
+    """
+    course_access.require_active(user)  # before any lookup: a disabled principal learns nothing
+    session = session_factory()
+    try:
+        try:
+            course_id = session.execute(
+                select(Document.course_id).where(Document.id == document_id)
+            ).scalar_one_or_none()
+            if course_id is None:
+                raise document_not_found()
+            access = course_access.load_course_access(session, user, course_id, lock=True)
+            if not access.can_read:
+                raise document_not_found()
+            if not access.can_upload:
+                raise withdraw_not_allowed()
+            session.execute(
+                text(
+                    "SELECT id FROM ingestion_jobs WHERE document_id = :id "
+                    "ORDER BY (kind = 'index'), id FOR UPDATE"
+                ),
+                {"id": document_id},
+            ).all()
+            document = session.execute(
+                text(
+                    "SELECT status, origin, course_id, source_id, external_resource_id "
+                    "FROM documents WHERE id = :id FOR UPDATE"
+                ),
+                {"id": document_id},
+            ).one()
+            if document.course_id != course_id:  # never changes; checked again under the lock
+                raise document_not_found()
+            if document.status == "withdrawn":
+                session.rollback()
+                return False
+            if document.origin != "class" or document.source_id is not None or document.external_resource_id is not None:
+                raise not_withdrawable()
+            cancelled = session.execute(
+                text(
+                    "UPDATE ingestion_jobs SET status = 'failed', "
+                    # clock_timestamp(): a claim committed after this transaction began has a later started_at.
+                    "finished_at = greatest(clock_timestamp(), started_at), lease_expires_at = NULL, "
+                    "error_message = :message, updated_at = now() "
+                    "WHERE document_id = :id AND status IN ('queued', 'running') RETURNING id"
+                ),
+                {"id": document_id, "message": WITHDRAWN_JOB_MESSAGE},
+            ).scalars().all()
+            session.execute(
+                text(
+                    "UPDATE documents SET status = 'withdrawn', withdrawn_at = clock_timestamp(), withdrawn_by = :by "
+                    "WHERE id = :id"
+                ),
+                {"id": document_id, "by": user.id},
+            )
+            session.commit()
+        except ApiError:
+            _rollback_quietly(session)
+            raise
+        except SQLAlchemyError as exc:
+            log.exception("document withdrawal failed document_id=%s", document_id)
+            _rollback_quietly(session)
+            raise withdraw_failed(exc) from None
+    finally:
+        try:
+            session.close()
+        except Exception:  # noqa: BLE001 - closing a broken connection must not mask the outcome
+            log.warning("closing the withdrawal session failed", exc_info=True)
+    log.info(
+        "document_withdrawn document_id=%s course_id=%s by=%s cancelled_jobs=%s",
+        document_id,
+        course_id,
+        user.id,
+        ",".join(str(job) for job in cancelled) or "-",
+    )
+    return True

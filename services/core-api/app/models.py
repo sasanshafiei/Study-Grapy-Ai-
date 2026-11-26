@@ -39,10 +39,13 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
-from .schema_checks import (  # shared verbatim with migrations 0007, 0008 and 0012
+from .schema_checks import (  # shared verbatim with migrations 0007, 0008, 0012 and 0013
     ADMIN_AUDIT_SHAPE_CHECK,
     AUDIT_SHAPE_CHECK,
     BLUEPRINT_VALUES_CHECK,
+    DOCUMENT_DEDUP_WHERE,
+    DOCUMENT_STATUS_CHECK,
+    DOCUMENT_WITHDRAWAL_CHECK,
     EXAM_FIELDS_CHECK,
     EXAM_FINGERPRINT_CHECK,
     EXAM_ITEM_PURPOSE_CHECK,
@@ -171,7 +174,7 @@ class Source(Base):
 
 
 DOCUMENT_ORIGINS = ("class", "external", "web_cache")
-DOCUMENT_STATUSES = ("pending", "indexed", "failed", "stale")
+DOCUMENT_STATUSES = ("pending", "indexed", "failed", "stale", "withdrawn")
 DOCUMENT_KINDS = ("slides", "notes", "syllabus", "textbook", "article")
 
 
@@ -188,7 +191,7 @@ class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
         CheckConstraint("origin IN ('class', 'external', 'web_cache')", name="origin"),
-        CheckConstraint("status IN ('pending', 'indexed', 'failed', 'stale')", name="status"),
+        CheckConstraint(DOCUMENT_STATUS_CHECK, name="status"),
         CheckConstraint(
             "kind IS NULL OR kind IN ('slides', 'notes', 'syllabus', 'textbook', 'article')", name="kind"
         ),
@@ -206,14 +209,12 @@ class Document(Base):
         ),
         Index(None, "course_id"),
         # Course-scoped deduplication of stored class files. Legacy rows have no
-        # storage_key, so their (possibly non-canonical) hashes are not part of it.
-        Index(
-            None,
-            "course_id",
-            "content_hash",
-            unique=True,
-            postgresql_where=text("origin = 'class' AND storage_key IS NOT NULL"),
-        ),
+        # storage_key, so their (possibly non-canonical) hashes are not part of it;
+        # withdrawn rows (WP-10, revision 0013) have left it, so the file can be uploaded again.
+        Index(None, "course_id", "content_hash", unique=True, postgresql_where=text(DOCUMENT_DEDUP_WHERE)),
+        # WP-10: only a course's class upload can be withdrawn; withdrawal is final (trigger
+        # documents_withdrawal_final, revision 0013) and recorded on the row.
+        CheckConstraint(DOCUMENT_WITHDRAWAL_CHECK, name="withdrawal"),
         # M6: a harvested version is a fileless external document of a course and a source.
         CheckConstraint(
             "external_resource_id IS NULL OR (origin = 'external' AND course_id IS NOT NULL"
@@ -256,7 +257,7 @@ class Document(Base):
     licence: Mapped[str] = mapped_column(String(100), nullable=True)
     language: Mapped[str] = mapped_column(String(10), default="en")
     content_hash: Mapped[str] = mapped_column(String(64), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | indexed | failed | stale
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | indexed | failed | stale | withdrawn
     fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     # Naive timestamp from the baseline schema, interpreted as UTC (see docs/document-ingestion.md).
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -272,6 +273,9 @@ class Document(Base):
     # --- added by revision 0005 (M6): the resource this harvested version belongs to ---
     # The key is composite (see __table_args__): the resource must belong to this document's course and source.
     external_resource_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    # --- added by revision 0013 (WP-10): the withdrawal record of a withdrawn class upload ---
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    withdrawn_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 
 JOB_KINDS = ("parse", "index")

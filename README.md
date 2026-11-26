@@ -43,7 +43,7 @@ check everything is wired:
 docker compose run --rm migrate                  # alembic upgrade head, as the schema owner
 docker compose run --rm db-init                  # runtime roles and grants: explicit, after every migration
 docker compose up -d                             # restart the API and workers as studygraph_app
-docker compose exec core-api alembic current     # expect: 0011 (head) for this version
+docker compose exec core-api alembic current     # expect: 0013 (head) for this version
 docker compose exec core-api python -m app.ingestion.admin init-storage --database studygraph   # once
 
 curl localhost:8000/health        # core-api process liveness

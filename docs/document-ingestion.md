@@ -105,6 +105,7 @@ A malformed course id in the path gets FastAPI's standard 422.
 | `indexed` | | `ready` |
 | `failed` | | `failed`, `error` = `documents.error_message` |
 | `stale` | | `failed`, `error` = the stored message or "The original source is no longer available." |
+| `withdrawn` | WP-10: the course's professor withdrew it | never listed ([document-withdrawal.md](document-withdrawal.md)) |
 
 `stale` (a harvested page that disappeared upstream) is deliberately **not**
 `ready`. Whether the web app should get its own `stale` value is a CE-2 decision.

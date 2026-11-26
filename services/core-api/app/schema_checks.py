@@ -1,7 +1,8 @@
-"""CHECK expressions of revisions 0007 (M8), 0008 (M9) and 0012 (WP-9), shared by the ORM models.
+"""CHECK expressions of revisions 0007 (M8), 0008 (M9), 0012 (WP-9) and 0013 (WP-10), shared by the ORM models.
 
-Migrations 0007, 0008 and 0012 are self-contained and keep their own verbatim copies;
-tests/test_m8_unit.py (0007), tests/test_migration_0008.py (0008) and tests/test_migration_0012.py (0012) assert that
+Migrations 0007, 0008, 0012 and 0013 are self-contained and keep their own verbatim copies;
+tests/test_m8_unit.py (0007), tests/test_migration_0008.py (0008), tests/test_migration_0012.py (0012) and
+tests/test_wp10_withdrawal.py (0013) assert that
 they are identical, so the ORM and the migrated database cannot drift apart silently. Every multi-branch CHECK is
 `(...) IS TRUE`: a CHECK that evaluates to NULL would otherwise pass.
 """
@@ -207,3 +208,13 @@ ADMIN_AUDIT_SHAPE_CHECK = (
     " AND (operation_id IS NOT NULL) = (action IN ('harvest_triggered', 'parse_retried', 'index_retried'))"
     " AND jsonb_typeof(details) = 'object' AND octet_length(details::text) <= 2048) IS TRUE"
 )
+
+# Revision 0013 (WP-10): document withdrawal. A withdrawn row is a class upload of a course with its withdrawal
+# record; other rows carry none. Withdrawn rows leave course-scoped deduplication.
+DOCUMENT_STATUS_CHECK = "status IN ('pending', 'indexed', 'failed', 'stale', 'withdrawn')"
+DOCUMENT_WITHDRAWAL_CHECK = (
+    "((status = 'withdrawn' AND withdrawn_at IS NOT NULL AND withdrawn_by IS NOT NULL AND origin = 'class'"
+    " AND course_id IS NOT NULL AND source_id IS NULL AND external_resource_id IS NULL)"
+    " OR (status <> 'withdrawn' AND withdrawn_at IS NULL AND withdrawn_by IS NULL)) IS TRUE"
+)
+DOCUMENT_DEDUP_WHERE = "origin = 'class' AND storage_key IS NOT NULL AND status <> 'withdrawn'"
