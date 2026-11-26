@@ -28,7 +28,7 @@ def test_downgrade_refuses_while_openstax_state_exists_and_round_trips_without_i
     try:
         with pytest.raises(pytest.fail.Exception, match="downgrade to 0010 refused"):
             alembic("downgrade", "0010")
-        assert world.scalar("SELECT version_num FROM alembic_version") == "0011"  # nothing was changed
+        assert world.scalar("SELECT version_num FROM alembic_version") == head_revision()  # nothing was changed
         world.execute("DELETE FROM harvest_provider_budgets WHERE source_id = :s", s=openstax)
         world.execute("DELETE FROM sources WHERE id = :s", s=openstax)
         world.sources.remove(openstax)
@@ -41,5 +41,5 @@ def test_downgrade_refuses_while_openstax_state_exists_and_round_trips_without_i
         assert world.scalar("SELECT provider FROM sources WHERE id = :s", s=wiki) == "wikipedia"
     finally:
         alembic("upgrade", "head")
-    assert world.scalar("SELECT version_num FROM alembic_version") == head_revision() == "0011"
+    assert world.scalar("SELECT version_num FROM alembic_version") == head_revision() == "0012"
     assert world.scalar("SELECT count(*) FROM pg_trigger WHERE tgname = 'sources_openstax_insert_disabled'") == 1

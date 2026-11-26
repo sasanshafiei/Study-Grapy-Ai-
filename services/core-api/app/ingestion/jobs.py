@@ -481,56 +481,63 @@ class RetryRefused(Exception):
 
 
 def retry_parse(session_factory: sessionmaker[Session], document_id: uuid.UUID) -> uuid.UUID:
-    """Queue a new parse job for a failed document; returns the new job's id.
+    """Queue a new parse job for a failed document in its own transaction; returns the new job's id."""
+    with session_factory() as session:
+        job_id = queue_parse_retry(session, document_id)
+        session.commit()
+    log.warning("parse_retry_queued document_id=%s job_id=%s", document_id, job_id)
+    return job_id
+
+
+def queue_parse_retry(session: Session, document_id: uuid.UUID) -> uuid.UUID:
+    """Queue a new parse job for a failed document in the caller's transaction (the caller commits).
 
     A new job row (new id, attempt count 0, new tokens): the failed job stays
     as history and no attempt identity is ever reused. Only for a document
     that is `failed`, has a stored file, and has neither an active nor a
     succeeded parse job (successful documents are never reparsed here).
     Concurrent retries of the same document serialize on the job and document
-    row locks (taken in the usual order); the loser is refused.
+    row locks (taken in the usual order); the loser is refused. On
+    RetryRefused the caller must roll back (the transaction may be aborted).
     """
-    with session_factory() as session:
-        jobs = session.execute(
-            text(
-                "SELECT id, status FROM ingestion_jobs WHERE document_id = :id AND kind = 'parse' "
-                "ORDER BY id FOR UPDATE"
-            ),
-            {"id": document_id},
-        ).all()
-        document = session.execute(
-            text("SELECT status, storage_key FROM documents WHERE id = :id FOR UPDATE"), {"id": document_id}
-        ).one_or_none()
-        if document is None:
-            raise RetryRefused("no such document")
-        if document.storage_key is None:
-            raise RetryRefused("the document has no stored file")
-        if document.status != "failed":
-            raise RetryRefused(f"the document is {document.status}, not failed")
-        # Re-read: a job inserted by a concurrent retry is not in `jobs`.
-        statuses = set(
-            session.execute(
-                text("SELECT status FROM ingestion_jobs WHERE document_id = :id AND kind = 'parse'"),
-                {"id": document_id},
-            ).scalars()
-        ) | {row.status for row in jobs}
-        if statuses & {"queued", "running"}:
-            raise RetryRefused("a parse job is already queued or running")
-        if "succeeded" in statuses:
-            raise RetryRefused("the document was already parsed; reparsing is not supported")
-        try:
-            job_id = session.execute(
-                text("INSERT INTO ingestion_jobs (document_id, kind) VALUES (:id, 'parse') RETURNING id"),
-                {"id": document_id},
-            ).scalar_one()
-        except IntegrityError:
-            raise RetryRefused("a parse job is already queued or running") from None
+    jobs = session.execute(
+        text(
+            "SELECT id, status FROM ingestion_jobs WHERE document_id = :id AND kind = 'parse' "
+            "ORDER BY id FOR UPDATE"
+        ),
+        {"id": document_id},
+    ).all()
+    document = session.execute(
+        text("SELECT status, storage_key FROM documents WHERE id = :id FOR UPDATE"), {"id": document_id}
+    ).one_or_none()
+    if document is None:
+        raise RetryRefused("no such document")
+    if document.storage_key is None:
+        raise RetryRefused("the document has no stored file")
+    if document.status != "failed":
+        raise RetryRefused(f"the document is {document.status}, not failed")
+    # Re-read: a job inserted by a concurrent retry is not in `jobs`.
+    statuses = set(
         session.execute(
-            text("UPDATE documents SET status = 'pending', error_message = NULL WHERE id = :id"),
+            text("SELECT status FROM ingestion_jobs WHERE document_id = :id AND kind = 'parse'"),
             {"id": document_id},
-        )
-        session.commit()
-    log.warning("parse_retry_queued document_id=%s job_id=%s", document_id, job_id)
+        ).scalars()
+    ) | {row.status for row in jobs}
+    if statuses & {"queued", "running"}:
+        raise RetryRefused("a parse job is already queued or running")
+    if "succeeded" in statuses:
+        raise RetryRefused("the document was already parsed; reparsing is not supported")
+    try:
+        job_id = session.execute(
+            text("INSERT INTO ingestion_jobs (document_id, kind) VALUES (:id, 'parse') RETURNING id"),
+            {"id": document_id},
+        ).scalar_one()
+    except IntegrityError:
+        raise RetryRefused("a parse job is already queued or running") from None
+    session.execute(
+        text("UPDATE documents SET status = 'pending', error_message = NULL WHERE id = :id"),
+        {"id": document_id},
+    )
     return job_id
 
 
@@ -696,7 +703,17 @@ def _mark_stale(session: Session, document_id: uuid.UUID, reason: str) -> None:
 
 
 def retry_index(session_factory: sessionmaker[Session], document_id: uuid.UUID) -> uuid.UUID:
-    """Queue a new index job for a document whose indexing failed; returns the new job's id.
+    """Queue a new index job for a failed document in its own transaction; returns the new job's id."""
+    with session_factory() as session:
+        job_id = queue_index_retry(session, document_id)
+        session.commit()
+    log.warning("index_retry_queued document_id=%s job_id=%s", document_id, job_id)
+    return job_id
+
+
+def queue_index_retry(session: Session, document_id: uuid.UUID) -> uuid.UUID:
+    """Queue a new index job for a document whose indexing failed, in the caller's transaction (the caller
+    commits; on RetryRefused it must roll back).
 
     No extraction is repeated: the stored sections of the succeeded parse are
     indexed again, and since the idempotency key is a function of the content,
@@ -707,67 +724,64 @@ def retry_index(session_factory: sessionmaker[Session], document_id: uuid.UUID) 
     history; attempt counts are never reset or reused. Concurrent retries
     serialize on the job and document row locks; the loser is refused.
     """
-    with session_factory() as session:
-        resource_id = session.execute(
-            text("SELECT external_resource_id FROM documents WHERE id = :id"), {"id": document_id}
-        ).scalar_one_or_none()
-        resource = None
-        if resource_id is not None:
-            # M6: a harvested version has no file and no parse job. The resource is
-            # locked first (global order), and only its current version may be retried.
-            resource = session.execute(
-                text("SELECT state, current_document_id FROM external_resources WHERE id = :r FOR NO KEY UPDATE"),
-                {"r": resource_id},
-            ).one()
-        jobs = session.execute(
-            # Lock order: parse job rows, then index job rows, then the document
-            # (as parse completion: parse job, document, index job; index
-            # completion: index job, document).
-            text(
-                "SELECT id, kind, status FROM ingestion_jobs WHERE document_id = :id "
-                "ORDER BY (kind = 'index'), id FOR UPDATE"
-            ),
-            {"id": document_id},
-        ).all()
-        document = session.execute(
-            text("SELECT status FROM documents WHERE id = :id FOR UPDATE"), {"id": document_id}
-        ).one_or_none()
-        if document is None:
-            raise RetryRefused("no such document")
-        if document.status != "failed":
-            raise RetryRefused(f"the document is {document.status}, not failed")
-        rows = {
-            (row.kind, row.status)
-            for row in session.execute(
-                text("SELECT kind, status FROM ingestion_jobs WHERE document_id = :id"), {"id": document_id}
+    resource_id = session.execute(
+        text("SELECT external_resource_id FROM documents WHERE id = :id"), {"id": document_id}
+    ).scalar_one_or_none()
+    resource = None
+    if resource_id is not None:
+        # M6: a harvested version has no file and no parse job. The resource is
+        # locked first (global order), and only its current version may be retried.
+        resource = session.execute(
+            text("SELECT state, current_document_id FROM external_resources WHERE id = :r FOR NO KEY UPDATE"),
+            {"r": resource_id},
+        ).one()
+    jobs = session.execute(
+        # Lock order: parse job rows, then index job rows, then the document
+        # (as parse completion: parse job, document, index job; index
+        # completion: index job, document).
+        text(
+            "SELECT id, kind, status FROM ingestion_jobs WHERE document_id = :id "
+            "ORDER BY (kind = 'index'), id FOR UPDATE"
+        ),
+        {"id": document_id},
+    ).all()
+    document = session.execute(
+        text("SELECT status FROM documents WHERE id = :id FOR UPDATE"), {"id": document_id}
+    ).one_or_none()
+    if document is None:
+        raise RetryRefused("no such document")
+    if document.status != "failed":
+        raise RetryRefused(f"the document is {document.status}, not failed")
+    rows = {
+        (row.kind, row.status)
+        for row in session.execute(
+            text("SELECT kind, status FROM ingestion_jobs WHERE document_id = :id"), {"id": document_id}
+        )
+    } | {(row.kind, row.status) for row in jobs}
+    if any(status in ("queued", "running") for _, status in rows):
+        raise RetryRefused("a job of this document is already queued or running")
+    if resource is not None:
+        if resource.state != "accepted" or resource.current_document_id != document_id:
+            raise RetryRefused("a newer version of this external resource exists (or its page is missing)")
+    elif ("parse", "succeeded") not in rows:
+        raise RetryRefused("the document was never parsed; use retry-parse")
+    if ("index", "succeeded") in rows:
+        raise RetryRefused("the document was already indexed; reindexing is not supported")
+    sections = session.execute(
+        text("SELECT count(*) FROM document_sections WHERE document_id = :id"), {"id": document_id}
+    ).scalar_one()
+    if sections == 0:
+        raise RetryRefused("the document has no stored sections")
+    try:
+        with session.begin_nested():
+            job_id = session.execute(
+                text("INSERT INTO ingestion_jobs (document_id, kind) VALUES (:id, 'index') RETURNING id"),
+                {"id": document_id},
+            ).scalar_one()
+            session.execute(
+                text("UPDATE documents SET status = 'pending', error_message = NULL WHERE id = :id"),
+                {"id": document_id},
             )
-        } | {(row.kind, row.status) for row in jobs}
-        if any(status in ("queued", "running") for _, status in rows):
-            raise RetryRefused("a job of this document is already queued or running")
-        if resource is not None:
-            if resource.state != "accepted" or resource.current_document_id != document_id:
-                raise RetryRefused("a newer version of this external resource exists (or its page is missing)")
-        elif ("parse", "succeeded") not in rows:
-            raise RetryRefused("the document was never parsed; use retry-parse")
-        if ("index", "succeeded") in rows:
-            raise RetryRefused("the document was already indexed; reindexing is not supported")
-        sections = session.execute(
-            text("SELECT count(*) FROM document_sections WHERE document_id = :id"), {"id": document_id}
-        ).scalar_one()
-        if sections == 0:
-            raise RetryRefused("the document has no stored sections")
-        try:
-            with session.begin_nested():
-                job_id = session.execute(
-                    text("INSERT INTO ingestion_jobs (document_id, kind) VALUES (:id, 'index') RETURNING id"),
-                    {"id": document_id},
-                ).scalar_one()
-                session.execute(
-                    text("UPDATE documents SET status = 'pending', error_message = NULL WHERE id = :id"),
-                    {"id": document_id},
-                )
-        except IntegrityError:
-            raise RetryRefused("an index job (or another pending version) is already queued or running") from None
-        session.commit()
-    log.warning("index_retry_queued document_id=%s job_id=%s", document_id, job_id)
+    except IntegrityError:
+        raise RetryRefused("an index job (or another pending version) is already queued or running") from None
     return job_id

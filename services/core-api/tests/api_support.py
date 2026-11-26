@@ -173,6 +173,24 @@ def remove_m9_state(connection, users: list, courses: list) -> None:
         connection.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}"))
 
 
+def remove_admin_audit_state(connection, users: list) -> None:
+    """Delete the WP-9 admin audit events (revision 0012) these test users wrote, inside the caller's transaction.
+
+    Like remove_m9_state, the deliberate removal procedure: as the table owner, disable the append-only guard
+    (ALTER TABLE is transactional), delete, enable it again.
+    """
+    if connection.execute(text("SELECT to_regclass('public.admin_audit_events') IS NULL")).scalar_one():
+        return
+    ids = {"u": list(users)}
+    if not connection.execute(
+        text("SELECT EXISTS (SELECT 1 FROM admin_audit_events WHERE actor_id = ANY(:u))"), ids
+    ).scalar_one():
+        return
+    connection.execute(text("ALTER TABLE admin_audit_events DISABLE TRIGGER admin_audit_events_guard"))
+    connection.execute(text("DELETE FROM admin_audit_events WHERE actor_id = ANY(:u)"), ids)
+    connection.execute(text("ALTER TABLE admin_audit_events ENABLE TRIGGER admin_audit_events_guard"))
+
+
 def remove_quiz_state(connection, users: list, courses: list) -> None:
     """Delete M7 rows (and practice rows) of these users and courses, inside the caller's transaction.
 
@@ -316,6 +334,7 @@ class World:
 
     def cleanup(self) -> None:
         with self.engine.begin() as connection:
+            remove_admin_audit_state(connection, self.users)
             remove_quiz_state(connection, self.users, self.courses)
             # M5: chunks, their topic links and topics of this test's courses and documents.
             doc_filter = "document_id IN (SELECT id FROM documents WHERE course_id = ANY(:c) OR id = ANY(:d))"

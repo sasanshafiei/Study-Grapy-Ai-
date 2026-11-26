@@ -39,7 +39,8 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
-from .schema_checks import (  # shared verbatim with migrations 0007 and 0008
+from .schema_checks import (  # shared verbatim with migrations 0007, 0008 and 0012
+    ADMIN_AUDIT_SHAPE_CHECK,
     AUDIT_SHAPE_CHECK,
     BLUEPRINT_VALUES_CHECK,
     EXAM_FIELDS_CHECK,
@@ -1502,4 +1503,34 @@ class ExamIdempotencyKey(Base):
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     course_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("courses.id"), nullable=False)
     resource_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+# --- Revision 0012 (WP-9): admin audit events -----------------------------------------------------------------
+
+
+class AdminAuditEvent(Base):
+    """Append-only record of every committed admin mutation (app/admin/mutations.py; docs/admin-api.md).
+
+    Written in the same transaction as the change it records, never by an API client. actor_id is the
+    authenticated administrator whose users row was locked and re-checked in that transaction; a trigger
+    refuses a row whose actor is not an active admin, and refuses UPDATE, DELETE and TRUNCATE. entity_id and
+    operation_id (the run or job the action created) have no foreign key, so history survives the entity.
+    details holds ids, states and counts only.
+    """
+
+    __tablename__ = "admin_audit_events"
+    __table_args__ = (
+        CheckConstraint(ADMIN_AUDIT_SHAPE_CHECK, name="shape"),
+        Index("admin_audit_events_entity_idx", "entity_kind", "entity_id", "created_at"),
+        Index("admin_audit_events_actor_idx", "actor_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = pk()
+    actor_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    entity_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    operation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

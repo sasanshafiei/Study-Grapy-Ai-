@@ -1,7 +1,7 @@
-"""CHECK expressions of revisions 0007 (M8) and 0008 (M9), shared by the ORM models.
+"""CHECK expressions of revisions 0007 (M8), 0008 (M9) and 0012 (WP-9), shared by the ORM models.
 
-Migrations 0007 and 0008 are self-contained and keep their own verbatim copies;
-tests/test_m8_unit.py (0007) and tests/test_migration_0008.py (0008) assert that
+Migrations 0007, 0008 and 0012 are self-contained and keep their own verbatim copies;
+tests/test_m8_unit.py (0007), tests/test_migration_0008.py (0008) and tests/test_migration_0012.py (0012) assert that
 they are identical, so the ORM and the migrated database cannot drift apart silently. Every multi-branch CHECK is
 `(...) IS TRUE`: a CHECK that evaluates to NULL would otherwise pass.
 """
@@ -193,4 +193,17 @@ AUDIT_SHAPE_CHECK = (
 
 IDEMPOTENCY_CHECK = (
     "operation IN ('question_create', 'exam_create', 'exam_duplicate') AND request_fingerprint ~ '^[0-9a-f]{64}$'"
+)
+
+
+# --- Revision 0012 (WP-9): admin audit events --------------------------------------------------------------
+# Each action names exactly one kind of audited entity; details is a small JSON object (ids, states, counts).
+ADMIN_AUDIT_ACTIONS = {
+    "source_enabled": "source", "source_disabled": "source", "harvest_triggered": "course",
+    "parse_retried": "document", "index_retried": "document",
+}  # fmt: skip
+ADMIN_AUDIT_SHAPE_CHECK = (
+    "((" + " OR ".join(f"(action = '{a}' AND entity_kind = '{k}')" for a, k in ADMIN_AUDIT_ACTIONS.items()) + ")"
+    " AND (operation_id IS NOT NULL) = (action IN ('harvest_triggered', 'parse_retried', 'index_retried'))"
+    " AND jsonb_typeof(details) = 'object' AND octet_length(details::text) <= 2048) IS TRUE"
 )

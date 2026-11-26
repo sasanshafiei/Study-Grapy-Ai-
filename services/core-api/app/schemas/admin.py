@@ -129,3 +129,36 @@ class AdminJob(_Strict):
 class AdminJobList(_Strict):
     items: list[AdminJob]
     next_cursor: str | None
+
+
+# --- mutations (WP-9) ---------------------------------------------------------------------------------------
+# Requests are read with app/json_body.read_json_object and checked field by field after authorization;
+# these response models are validated with extra="forbid" like the read-only ones.
+
+
+class AdminSourceChange(_Strict):
+    source_id: str
+    enabled: bool
+    changed: bool = Field(description="false: the source was already in this state and no run was cancelled.")
+    cancelled_runs: int = Field(ge=0)
+    audit_event_id: str | None = Field(description="null exactly when changed is false (nothing was written).")
+
+
+class AdminHarvestRunCreated(_Strict):
+    run_id: str
+    course_id: str
+    source_id: str
+    status: Literal["queued"]
+    trigger: Literal["manual"]
+    created_at: str
+    audit_event_id: str
+
+
+class AdminJobRetry(_Strict):
+    job_id: str = Field(description="The new queued job.")
+    retried_job_id: str = Field(description="The failed job, kept unchanged as history.")
+    document_id: str
+    kind: Literal["parse", "index"]
+    status: Literal["queued"]
+    created_at: str
+    audit_event_id: str

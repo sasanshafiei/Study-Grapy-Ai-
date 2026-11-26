@@ -49,10 +49,12 @@ def admin_required() -> ApiError:
     return ApiError(403, "admin_required", "Only administrators can see this.")
 
 
-def require_admin(session: Session, user: CurrentUser) -> None:
+def require_admin(session: Session, user: CurrentUser, *, lock: bool = False) -> None:
+    """The caller's users row must exist and be an active admin. `lock` (mutations, WP-9) holds the row
+    FOR SHARE until the transaction ends, so a concurrent demotion or disablement cannot interleave."""
     require_active(user)
     account = session.execute(
-        text("SELECT role, status FROM users WHERE id = :u"), {"u": user.id}
+        text("SELECT role, status FROM users WHERE id = :u" + (" FOR SHARE" if lock else "")), {"u": user.id}
     ).one_or_none()
     if account is None:
         raise not_authenticated()
@@ -75,16 +77,23 @@ def _str(value: uuid.UUID | None) -> str | None:
     return None if value is None else str(value)
 
 
+def stored_error_code(stored_message: str | None) -> str | None:
+    """The stable code of a document job's stored message ("code: detail"); never the detail itself."""
+    if stored_message is None:
+        return None
+    match = _STORED_CODE.match(stored_message)
+    return "unknown" if match is None else match.group(1)
+
+
 def _job_error(stored_message: str | None, error_code: str | None) -> dict | None:
     """A safe summary: the stable code and, for document jobs, the reviewed public message."""
     if error_code is not None:  # harvest runs store a code only
         return {"code": error_code, "message": None}
-    if stored_message is None:
+    code = stored_error_code(stored_message)
+    if code is None:
         return None
-    match = _STORED_CODE.match(stored_message)
-    if match is None:
-        return {"code": "unknown", "message": GENERIC_FAILURE}
-    code = match.group(1)
+    if code == "unknown":
+        return {"code": code, "message": GENERIC_FAILURE}
     return {"code": code, "message": PUBLIC_MESSAGES.get(code, GENERIC_FAILURE)}
 
 
