@@ -30,6 +30,13 @@ ROUTINE_OF = {
     "studygraph_ai_indexer": "commit",
     "studygraph_ai_retriever": "retrieve",
 }
+# Sub-switches that take effect only while their parent switch is on (app/config.py).
+PARENT_FLAG = {
+    "quiz_generation_enabled": "quiz_enabled",
+    "quiz_attempts_enabled": "quiz_enabled",
+    "exam_export_enabled": "exams_enabled",
+    "exam_generation_enabled": "exams_enabled",
+}
 
 # Per StudyGraph group, and per login that is a member of an AI group: the routines it can execute, how
 # many public relations it holds any privilege on, which it cannot read, and how many there are.
@@ -167,9 +174,11 @@ def superuser_result(count, names):
 
 
 def flags_result(settings):
-    on = sorted(name.upper() for name, value in settings.model_dump().items()
-                if name.endswith("_enabled") and value is True)
-    return ("NOTE", "flags", f"enabled in core-api: {', '.join(on) or 'none'}")
+    """The feature switches in effect: on, and (for a sub-switch) its parent on too."""
+    values = settings.model_dump()
+    on = sorted(name.upper() for name, value in values.items()
+                if name.endswith("_enabled") and value is True and values.get(PARENT_FLAG.get(name, name)) is True)
+    return ("NOTE", "flags", f"in effect in core-api: {', '.join(on) or 'none'}")
 
 
 def database_results(conn, expected_user):
