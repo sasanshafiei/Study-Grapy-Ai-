@@ -75,6 +75,22 @@ def test_ai_login_and_superuser_verdicts():
     assert dev_smoke.superuser_result(2, "psql, unnamed")[0] == "FAIL"
 
 
+def test_flags_note_lists_only_switches_in_effect():
+    class FakeSettings:
+        def __init__(self, **values):
+            self.values = values
+
+        def model_dump(self):
+            return self.values
+
+    defaults = FakeSettings(dashboard_enabled=True, quiz_enabled=False, quiz_generation_enabled=True,
+                            quiz_attempts_enabled=True, exams_enabled=False, chat_scopes="class_only")
+    assert dev_smoke.flags_result(defaults)[2] == "in effect in core-api: DASHBOARD_ENABLED"
+    quiz_on = FakeSettings(quiz_enabled=True, quiz_generation_enabled=False, quiz_attempts_enabled=True)
+    assert dev_smoke.flags_result(quiz_on)[2] == "in effect in core-api: QUIZ_ATTEMPTS_ENABLED, QUIZ_ENABLED"
+    assert dev_smoke.flags_result(FakeSettings(dashboard_enabled=False))[2] == "in effect in core-api: none"
+
+
 def test_unknown_command_prints_usage(capsys):
     assert dev_smoke.main(["nope"]) == 2
     assert "python -m scripts.dev_smoke api" in capsys.readouterr().err
