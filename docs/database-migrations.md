@@ -22,8 +22,10 @@ error and creates nothing: tables created that way are invisible to Alembic.
 
 ## Ground rules
 
-- Run Alembic **inside the core-api container** (`docker compose exec core-api alembic ...`),
-  where docker-compose sets `DATABASE_URL` to the `db` service.
+- Run Alembic with the **`migrate` tool** (`docker compose run --rm migrate alembic ...`), the only
+  service whose `DATABASE_URL` is the schema owner. The API and workers connect as `studygraph_app`,
+  which cannot run DDL ([database-security.md](database-security.md)). After every migration, re-apply
+  the runtime grants (`docker compose run --rm db-init`).
 - Never create or alter tables by hand or with `create_all()`.
 - Never edit a revision that has been merged; add a new one.
 - Revisions are self-contained: they must not import `app.models` (the models keep
@@ -47,7 +49,7 @@ its visible version and its `content_sha256`, the revision is not fetched again 
 held, and it is reconsidered as soon as nobody holds it (`app/harvest/persist.py`).
 
 - **Deploy order.** Run `alembic upgrade head` before starting the new core-api and workers.
-  `REQUIRED_SCHEMA_REVISION` is `0010`: until the database is there, `GET /readyz` answers
+  `REQUIRED_SCHEMA_REVISION` is `0010`: until the database is there, `GET /health/ready` answers
   503 `not_ready` and the worker preflight refuses to start. Code at 0009 does not know the
   column, so roll the schema and the code forward together.
 - **Downgrade** to 0009 drops the column. Resources that had a recorded duplicate revision
@@ -131,10 +133,10 @@ Revision 0013 (WP-10, document withdrawal, [document-withdrawal.md](document-wit
 docker compose up -d --build                       # start the stack (rebuild after dependency changes)
 docker compose run --rm migrate                    # create / update the schema, as the schema owner
 docker compose run --rm db-init                    # then re-apply the runtime grants (F05)
-docker compose exec core-api alembic current       # revision the database is at, e.g. "0004 (head)"
-docker compose exec core-api alembic history       # all revisions
-docker compose exec core-api alembic check         # models vs. database: expect "No new upgrade operations detected."
-docker compose exec core-api alembic upgrade head --sql   # print the SQL only, connect to nothing
+docker compose run --rm migrate alembic current   # revision the database is at; "(head)" when up to date
+docker compose run --rm migrate alembic history   # all revisions
+docker compose run --rm migrate alembic check     # models vs. database: expect "No new upgrade operations detected."
+docker compose run --rm migrate alembic upgrade head --sql   # print the SQL only, connect to nothing
 ```
 
 A brand-new database volume needs nothing but `alembic upgrade head` (then `db-init`).
@@ -142,6 +144,12 @@ The API and workers connect as the unprivileged `studygraph_app` login, which ca
 `docker compose exec core-api alembic upgrade head` is refused with `permission denied for schema public`.
 Read-only commands (`current`, `history`, `check`, `--sql`) still work there. See
 [database-security.md](database-security.md).
+
+**A database that already holds data** is upgraded as an explicit rollout, never by recreating it:
+take a backup and confirm it restores, read the SQL (`--sql`), check the rollout notes of every revision
+between its current revision and head (above), then `migrate`, `db-init` and restart the API and workers.
+Staging and production use their own owner and runtime credentials, never the Compose defaults or `db-init`
+([database-security.md](database-security.md#staging-and-production-rollout)).
 A database created earlier by `init_db.py` needs adopting first, see below. Running
 `upgrade` on it fails with `relation "users" already exists` and changes nothing
 (PostgreSQL runs the whole migration in one transaction).
@@ -516,7 +524,8 @@ Revision `0001` runs `CREATE EXTENSION IF NOT EXISTS vector` before creating
 `infra/postgres/init.sql`.
 
 - Installing pgvector needs a **superuser** (it is not a "trusted" extension). In
-  docker-compose the database user is a superuser. On a managed database, have an
+  docker-compose the `migrate` tool connects as the bootstrap superuser `studygraph`
+  (the runtime `studygraph_app` login is not one). On a managed database, have an
   administrator run `CREATE EXTENSION vector;` first; the migration then skips it.
 - Downgrading never drops the extension. It is shared by the whole database and
   may not have been created by the migration.
@@ -526,7 +535,7 @@ Revision `0001` runs `CREATE EXTENSION IF NOT EXISTS vector` before creating
 ## Writing a new migration
 
 ```bash
-docker compose exec core-api alembic revision --autogenerate --rev-id 0002 -m "add ingestion jobs"
+docker compose run --rm migrate alembic revision --autogenerate --rev-id 0002 -m "add ingestion jobs"
 ```
 
 Use the next sequential `--rev-id`; the file becomes `0002_add_ingestion_jobs.py`.
@@ -680,10 +689,13 @@ comparison output.
 1. **Read-only checks.** Both comparisons are required: they cover different
    things, see the next section.
 
+   These run through the `migrate` tool (schema owner), since a scaffold database has no
+   `studygraph_app` grants yet. Take a backup before step 2.
+
    ```bash
-   docker compose up -d --build core-api
-   docker compose exec -T -e PYTHONDONTWRITEBYTECODE=1 core-api python -m tests.schema_snapshot --compare tests/fixtures/scaffold_schema.json
-   docker compose exec -T db pg_dump -U studygraph -d studygraph --schema-only --no-owner --no-privileges | docker compose exec -T core-api python scripts/normalize_schema_dump.py | diff -u services/core-api/tests/fixtures/scaffold_schema.sql -
+   docker compose build migrate
+   docker compose run --rm -T -e PYTHONDONTWRITEBYTECODE=1 migrate python -m tests.schema_snapshot --compare tests/fixtures/scaffold_schema.json
+   docker compose exec -T db pg_dump -U studygraph -d studygraph --schema-only --no-owner --no-privileges | docker compose run --rm -T migrate python scripts/normalize_schema_dump.py | diff -u services/core-api/tests/fixtures/scaffold_schema.sql -
    docker compose exec -T db psql -U studygraph -d studygraph -X -At -c "SELECT to_regclass('public.alembic_version') IS NULL"
    ```
 
@@ -698,7 +710,7 @@ comparison output.
    test checks this.
 
    ```bash
-   docker compose exec -T core-api alembic stamp 0001
+   docker compose run --rm -T migrate alembic stamp 0001
    ```
 
    Stamp the explicit revision `0001`, never `head`. Once later revisions exist,
@@ -707,10 +719,11 @@ comparison output.
 3. **Verify, then continue normally.**
 
    ```bash
-   docker compose exec -T core-api alembic current   # 0001 (later revisions are not applied yet)
-   docker compose exec -T -e PYTHONDONTWRITEBYTECODE=1 core-api python -m tests.schema_snapshot --compare tests/fixtures/scaffold_schema.json
-   docker compose exec -T core-api alembic upgrade head   # applies the later revisions (see 0002's preflight)
-   docker compose exec -T core-api alembic check     # No new upgrade operations detected.
+   docker compose run --rm -T migrate alembic current   # 0001 (later revisions are not applied yet)
+   docker compose run --rm -T -e PYTHONDONTWRITEBYTECODE=1 migrate python -m tests.schema_snapshot --compare tests/fixtures/scaffold_schema.json
+   docker compose run --rm -T migrate alembic upgrade head   # applies the later revisions (see 0002's preflight)
+   docker compose run --rm -T migrate alembic check     # No new upgrade operations detected.
+   docker compose run --rm db-init                      # runtime roles and grants for the migrated schema
    ```
 
    `alembic check` only passes at head, so run it after `upgrade head`.

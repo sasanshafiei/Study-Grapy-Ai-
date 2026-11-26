@@ -8,8 +8,10 @@ one image to build and no second copy of the schema code. Entry point:
 - `ingestion.parse`: parse uploaded PDFs into page-aware sections (M3)
 - `ingestion.maintenance`: dispatch sweep, lease recovery, file reconciliation (M3), on
   their own worker so long parses cannot starve them
+- `ingestion.index`: indexing through the AI service (M4; off by default, `INDEXING_ENABLED`)
+- `harvest.run`: the external-source harvester (M6; off by default, `HARVEST_ENABLED`)
+- `mastery.deliver`: mastery event delivery (M8; off by default, `MASTERY_DELIVERY_ENABLED`)
 - Celery Beat: the maintenance schedule (one instance)
-- later: calling the AI service to index documents (M4), the external-source harvester
 
 Broker: the Redis instance from `docker-compose.yml` (`REDIS_URL`). There is no result
 backend: job state lives in PostgreSQL (`ingestion_jobs`). See

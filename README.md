@@ -43,7 +43,7 @@ check everything is wired:
 docker compose run --rm migrate                  # alembic upgrade head, as the schema owner
 docker compose run --rm db-init                  # runtime roles and grants: explicit, after every migration
 docker compose up -d                             # restart the API and workers as studygraph_app
-docker compose exec core-api alembic current     # expect: 0013 (head) for this version
+docker compose run --rm migrate alembic current  # expect: 0013 (head) for this version
 docker compose exec core-api python -m app.ingestion.admin init-storage --database studygraph   # once
 
 curl localhost:8000/health        # core-api process liveness
@@ -51,6 +51,12 @@ curl localhost:8000/health/db     # database connectivity and pgvector diagnosti
 curl --fail localhost:8000/health/ready  # core-api readiness for traffic
 curl localhost:8001/health        # mock ai-service up
 ```
+
+Order matters: `migrate` (schema owner) first, then `db-init`, then the runtime services. Until
+`db-init` has run on a volume, the API and workers cannot log in as `studygraph_app`; see
+[docs/database-security.md](docs/database-security.md). An existing database that holds data is
+upgraded as an explicit rollout: back it up first and follow the per-revision notes in
+[docs/database-migrations.md](docs/database-migrations.md). Never delete the volume to upgrade.
 
 | Core API probe | Meaning |
 | --- | --- |
@@ -96,7 +102,8 @@ apps/
 services/
   core-api/       FastAPI: auth, courses, docs, chat
                   proxy, quizzes, exams, admin ......... CE-1 (auth: CE-3)
-  worker/         Celery: parse, harvest, schedules .... CE-1
+  worker/         notes only; Celery workers run from
+                  the core-api code and image .......... CE-1
   ai-service/     retrieval, generation, mastery,
                   recommendations (MOCK for now) ....... AI-1, AI-2
 packages/
@@ -134,7 +141,11 @@ docs/decisions/   one short file per locked decision
    `exams` (manual professor exam builder, PDF/DOCX export)~~ done (M9-A1), see [docs/exam-api.md](docs/exam-api.md),
    [docs/exam-export.md](docs/exam-export.md) and [docs/frontend-exam-adaptation.md](docs/frontend-exam-adaptation.md)
    (off by default; AI-generated exam candidates are M9-A2 and wait for AI-1's protocol approval).
-3. Stand up the Celery worker and a first parse job.
-4. Build the external-source connectors (OpenStax, Wikipedia) and the harvester.
+3. ~~Stand up the Celery worker and a first parse job~~ Done (M3), see
+   [docs/document-processing.md](docs/document-processing.md). The index worker (M4) is off by default.
+4. ~~Build the external-source connectors (OpenStax, Wikipedia) and the harvester~~ Done (M6, WP-6), see
+   [docs/external-harvesting.md](docs/external-harvesting.md) (off by default; activation prerequisites,
+   licence terms and egress restrictions are listed there). Admin observability and audited mutations
+   (WP-4, WP-9): [docs/admin-api.md](docs/admin-api.md).
 
 See `CONTRIBUTING.md` for the branch/PR rules.

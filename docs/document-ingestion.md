@@ -13,11 +13,15 @@ list a course's documents.
 
 **Processing (M3)** is described in [document-processing.md](document-processing.md):
 after the commit the job is published to Redis, a Celery worker parses the PDF into
-page-aware sections, and the document waits for indexing (M4) as `processing`. Nothing
-is indexed or available to retrieval yet. Still not implemented: deleting, downloading
-or renaming documents, formats other than PDF, OCR, malware scanning,
-external/harvested documents. M3 also adds one upload rule: the upload store must be
-the one the database is bound to, otherwise `503 storage_unavailable`.
+page-aware sections, and the document waits for indexing (M4) as `processing`.
+Indexing is implemented on the CE side but off by default (`INDEXING_ENABLED=false`) pending
+joint approval and a verified AI-1 provider ([ai-indexing-integration.md](ai-indexing-integration.md)),
+so uploads normally stay `processing`. Harvested documents (M6) appear in the same list; see
+[external-harvesting.md](external-harvesting.md). Since WP-10 the course's professor can withdraw
+a class upload (`DELETE /api/v1/documents/{document_id}`; the row is kept as `withdrawn`, see
+[document-withdrawal.md](document-withdrawal.md)). Still not implemented: downloading or renaming
+documents, formats other than PDF, OCR, malware scanning. M3 also adds one upload
+rule: the upload store must be the one the database is bound to, otherwise `503 storage_unavailable`.
 
 ## Endpoints
 
@@ -116,8 +120,8 @@ A malformed course id in the path gets FastAPI's standard 422.
   shows `notes` for class documents and `article` otherwise, without writing it.
 - `added_by`: the uploader's `display_name`; `null` when there is no uploader.
 - `added_at`: `documents.created_at` in UTC (see timestamps).
-- `pages`: `documents.page_count` (filled by parsing, M3). `source_name`: always
-  `null` so far.
+- `pages`: `documents.page_count` (filled by parsing, M3). `source_name`: `null` for
+  uploads; for harvested documents the provider's display name (`Wikipedia`, `OpenStax`).
 
 ## Authentication and authorization
 
