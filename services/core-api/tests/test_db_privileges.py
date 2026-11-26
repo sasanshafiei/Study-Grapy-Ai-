@@ -43,7 +43,7 @@ RETRIEVE = "public.retrieve_index_chunks(uuid,text[])"
 VERIFY = "public.verified_index_generation(uuid,uuid,text,text,integer,integer)"
 # CE runtime tables that are not plain row DML; every other table must be.
 READ_ONLY = {"alembic_version", "index_generations", "chunk_topics", "chunks"}
-APPEND_ONLY = {"exam_audit_events"}
+APPEND_ONLY = {"exam_audit_events", "admin_audit_events"}
 DENIED = r"permission denied|must be owner|must be superuser|must have"
 
 
