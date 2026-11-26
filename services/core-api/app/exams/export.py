@@ -1,9 +1,9 @@
 """Official exports (E22) and watermarked preview files (E23).
 
-Flow: owner authorization -> EXAMS_ENABLED -> EXAM_EXPORT_ENABLED -> query (variant, format) -> the render
-model from one REPEATABLE READ READ ONLY snapshot -> per-professor rate limit and render slot -> the
-bounded renderer subprocess -> the audit event (with a fresh FOR SHARE re-authorization) committed BEFORE
-the first byte is sent -> the file.
+Flow: owner authorization -> EXAMS_ENABLED -> EXAM_EXPORT_ENABLED -> query (variant, format) -> per-professor
+rate limit -> render slot (held until the render ends) -> the render model from one REPEATABLE READ READ ONLY
+snapshot -> the bounded renderer subprocess -> slot released -> the audit event (with a fresh FOR SHARE
+re-authorization) committed BEFORE the first byte is sent -> the file.
 
 Variant-specific sanitized models (H6): the student model is assembled from a query that selects only header
 fields, numbering, points, type, stem and choice texts; answer keys, explanations, model answers, rubrics and

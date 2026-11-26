@@ -42,6 +42,17 @@ professor) and 429 `too_many_exports` (`EXAM_EXPORT_RATE_LIMIT` = 30 per 10 minu
 with `Retry-After`; 504 `export_timeout`; 500 `export_failed`. The limiters are in-process (per API
 process).
 
+Guard order (both file endpoints): authentication → owner authorization → `EXAMS_ENABLED` →
+`EXAM_EXPORT_ENABLED` → strict query (`variant`, `format`, exam id) → rate limit → render slot → the
+read-only snapshot (`404`/`409 exam_not_finalized`/`409 export_budget_exceeded`) → renderer → slot
+released → audit event. A request refused with 429 therefore never reads the exam or starts the
+renderer. Every admitted attempt counts against the rate limit, including one the snapshot then refuses
+with 404/409. That is deliberate: the over-budget draft check already loads the whole exam, and a separate
+eligibility query would add database work to every request. Only the course owner reaches the limiters,
+so a 429 reveals nothing to anyone else. The slot covers the snapshot and the render. It is released
+exactly once on every path (snapshot or render error, timeout, unexpected exception, cancellation),
+before the audit transaction.
+
 Every successful download commits one audit event (`export_downloaded` / `preview_file_downloaded`:
 variant, format, bytes, file SHA-256, renderer version; drafts also the draft version) **before** the
 first byte is sent, in a transaction that re-checks the owner with `FOR SHARE` locks. A failed render
