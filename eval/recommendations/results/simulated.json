@@ -1,0 +1,173 @@
+{
+  "seed": 2026,
+  "learners_per_scenario": 2000,
+  "target": "weak topic in the top 3",
+  "ranker": "studygraph-rank 0.1.0",
+  "mastery_params": "1.0.0-assist09",
+  "scenarios": {
+    "sparse (2-5 answers per topic)": {
+      "rule_based/1 (core-api today)": {
+        "learners": 2000,
+        "hit_at_3": 0.5215,
+        "hit_at_3_ci95": [
+          0.4996,
+          0.5433
+        ],
+        "hit_at_1": 0.514,
+        "empty": 0.01,
+        "strong_topic_share_of_top3": 0.0699,
+        "observably_weak_share": 0.6085,
+        "hit_at_3_when_observably_weak": 0.857
+      },
+      "ranker, recent answers only": {
+        "learners": 2000,
+        "hit_at_3": 0.7925,
+        "hit_at_3_ci95": [
+          0.7742,
+          0.8097
+        ],
+        "hit_at_1": 0.6495,
+        "empty": 0.0,
+        "strong_topic_share_of_top3": 0.1145,
+        "observably_weak_share": 0.6085,
+        "hit_at_3_when_observably_weak": 0.9704
+      },
+      "ranker, recent answers + mastery": {
+        "learners": 2000,
+        "hit_at_3": 0.7925,
+        "hit_at_3_ci95": [
+          0.7742,
+          0.8097
+        ],
+        "hit_at_1": 0.646,
+        "empty": 0.0,
+        "strong_topic_share_of_top3": 0.1158,
+        "observably_weak_share": 0.6085,
+        "hit_at_3_when_observably_weak": 0.963
+      }
+    },
+    "typical (4-12 answers)": {
+      "rule_based/1 (core-api today)": {
+        "learners": 2000,
+        "hit_at_3": 0.806,
+        "hit_at_3_ci95": [
+          0.7881,
+          0.8227
+        ],
+        "hit_at_1": 0.7995,
+        "empty": 0.0015,
+        "strong_topic_share_of_top3": 0.0277,
+        "observably_weak_share": 0.8995,
+        "hit_at_3_when_observably_weak": 0.8961
+      },
+      "ranker, recent answers only": {
+        "learners": 2000,
+        "hit_at_3": 0.8855,
+        "hit_at_3_ci95": [
+          0.8708,
+          0.8987
+        ],
+        "hit_at_1": 0.8025,
+        "empty": 0.0,
+        "strong_topic_share_of_top3": 0.0487,
+        "observably_weak_share": 0.8995,
+        "hit_at_3_when_observably_weak": 0.9844
+      },
+      "ranker, recent answers + mastery": {
+        "learners": 2000,
+        "hit_at_3": 0.888,
+        "hit_at_3_ci95": [
+          0.8734,
+          0.9011
+        ],
+        "hit_at_1": 0.792,
+        "empty": 0.0,
+        "strong_topic_share_of_top3": 0.0519,
+        "observably_weak_share": 0.8995,
+        "hit_at_3_when_observably_weak": 0.9833
+      }
+    },
+    "rich (10-30 answers)": {
+      "rule_based/1 (core-api today)": {
+        "learners": 2000,
+        "hit_at_3": 0.849,
+        "hit_at_3_ci95": [
+          0.8326,
+          0.864
+        ],
+        "hit_at_1": 0.8425,
+        "empty": 0.0025,
+        "strong_topic_share_of_top3": 0.0101,
+        "observably_weak_share": 0.899,
+        "hit_at_3_when_observably_weak": 0.9444
+      },
+      "ranker, recent answers only": {
+        "learners": 2000,
+        "hit_at_3": 0.894,
+        "hit_at_3_ci95": [
+          0.8797,
+          0.9067
+        ],
+        "hit_at_1": 0.8385,
+        "empty": 0.0,
+        "strong_topic_share_of_top3": 0.0178,
+        "observably_weak_share": 0.899,
+        "hit_at_3_when_observably_weak": 0.9944
+      },
+      "ranker, recent answers + mastery": {
+        "learners": 2000,
+        "hit_at_3": 0.9005,
+        "hit_at_3_ci95": [
+          0.8866,
+          0.9129
+        ],
+        "hit_at_1": 0.85,
+        "empty": 0.0,
+        "strong_topic_share_of_top3": 0.0176,
+        "observably_weak_share": 0.899,
+        "hit_at_3_when_observably_weak": 0.9944
+      }
+    },
+    "close (weak 0.30-0.50, others 0.55-0.80)": {
+      "rule_based/1 (core-api today)": {
+        "learners": 2000,
+        "hit_at_3": 0.593,
+        "hit_at_3_ci95": [
+          0.5713,
+          0.6143
+        ],
+        "hit_at_1": 0.5725,
+        "empty": 0.0025,
+        "strong_topic_share_of_top3": 0.0234,
+        "observably_weak_share": 0.8205,
+        "hit_at_3_when_observably_weak": 0.7227
+      },
+      "ranker, recent answers only": {
+        "learners": 2000,
+        "hit_at_3": 0.7535,
+        "hit_at_3_ci95": [
+          0.7341,
+          0.7719
+        ],
+        "hit_at_1": 0.5785,
+        "empty": 0.0,
+        "strong_topic_share_of_top3": 0.0299,
+        "observably_weak_share": 0.8205,
+        "hit_at_3_when_observably_weak": 0.9183
+      },
+      "ranker, recent answers + mastery": {
+        "learners": 2000,
+        "hit_at_3": 0.7515,
+        "hit_at_3_ci95": [
+          0.7321,
+          0.7699
+        ],
+        "hit_at_1": 0.5765,
+        "empty": 0.0,
+        "strong_topic_share_of_top3": 0.0312,
+        "observably_weak_share": 0.8205,
+        "hit_at_3_when_observably_weak": 0.9141
+      }
+    }
+  }
+}
